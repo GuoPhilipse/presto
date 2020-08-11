@@ -169,6 +169,15 @@ public class FunctionManager
         }
     }
 
+    @VisibleForTesting
+    public void addFunctionNamespace(String catalogName, FunctionNamespaceManager functionNamespaceManager)
+    {
+        transactionManager.registerFunctionNamespaceManager(catalogName, functionNamespaceManager);
+        if (functionNamespaceManagers.putIfAbsent(catalogName, functionNamespaceManager) != null) {
+            throw new IllegalArgumentException(format("Function namespace manager is already registered for catalog [%s]", catalogName));
+        }
+    }
+
     public FunctionInvokerProvider getFunctionInvokerProvider()
     {
         return functionInvokerProvider;
@@ -182,7 +191,7 @@ public class FunctionManager
         handleResolver.addFunctionNamespace(factory.getName(), factory.getHandleResolver());
     }
 
-    public void registerBuiltInFunctions(List<? extends BuiltInFunction> functions)
+    public void registerBuiltInFunctions(List<? extends SqlFunction> functions)
     {
         builtInFunctionNamespaceManager.registerBuiltInFunctions(functions);
     }

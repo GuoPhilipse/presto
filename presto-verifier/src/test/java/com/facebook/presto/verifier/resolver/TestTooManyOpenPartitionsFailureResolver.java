@@ -13,7 +13,6 @@
  */
 package com.facebook.presto.verifier.resolver;
 
-import com.facebook.presto.jdbc.QueryStats;
 import com.facebook.presto.sql.parser.IdentifierSymbol;
 import com.facebook.presto.sql.parser.ParsingOptions;
 import com.facebook.presto.sql.parser.SqlParser;
@@ -28,6 +27,7 @@ import com.facebook.presto.verifier.framework.QueryException;
 import com.facebook.presto.verifier.framework.QueryResult;
 import com.facebook.presto.verifier.framework.QueryStage;
 import com.facebook.presto.verifier.prestoaction.PrestoAction;
+import com.facebook.presto.verifier.prestoaction.QueryActionStats;
 import com.google.common.base.Suppliers;
 import com.google.common.collect.ImmutableList;
 import org.testng.annotations.Test;
@@ -62,7 +62,7 @@ public class TestTooManyOpenPartitionsFailureResolver
         }
 
         @Override
-        public QueryStats execute(Statement statement, QueryStage queryStage)
+        public QueryActionStats execute(Statement statement, QueryStage queryStage)
         {
             throw new UnsupportedOperationException();
         }
@@ -74,7 +74,7 @@ public class TestTooManyOpenPartitionsFailureResolver
             return new QueryResult(
                     ImmutableList.of(createTable.get()),
                     new TestingResultSetMetaData(ImmutableList.of(new ColumnInfo("Create Table", VARCHAR))),
-                    createQueryStats(0, 0));
+                    createQueryActionStats(0, 0));
         }
     }
 
@@ -93,7 +93,7 @@ public class TestTooManyOpenPartitionsFailureResolver
             false,
             TEST_MAIN,
             Optional.of(HIVE_TOO_MANY_OPEN_PARTITIONS),
-            Optional.of(createQueryStats(0, 0)));
+            createQueryActionStats(0, 0));
 
     private static final AtomicReference<String> createTable = new AtomicReference<>();
 

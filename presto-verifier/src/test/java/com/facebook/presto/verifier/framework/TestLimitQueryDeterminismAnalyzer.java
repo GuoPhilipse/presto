@@ -22,6 +22,7 @@ import com.facebook.presto.verifier.TestingResultSetMetaData;
 import com.facebook.presto.verifier.TestingResultSetMetaData.ColumnInfo;
 import com.facebook.presto.verifier.event.DeterminismAnalysisDetails;
 import com.facebook.presto.verifier.prestoaction.PrestoAction;
+import com.facebook.presto.verifier.prestoaction.QueryActionStats;
 import com.google.common.collect.ImmutableList;
 import org.testng.annotations.Test;
 
@@ -59,7 +60,7 @@ public class TestLimitQueryDeterminismAnalyzer
         }
 
         @Override
-        public QueryStats execute(Statement statement, QueryStage queryStage)
+        public QueryActionStats execute(Statement statement, QueryStage queryStage)
         {
             throw new UnsupportedOperationException();
         }
@@ -79,7 +80,9 @@ public class TestLimitQueryDeterminismAnalyzer
     }
 
     private static final long ROW_COUNT_WITH_LIMIT = 1000;
-    private static final QueryStats QUERY_STATS = new QueryStats("id", "", false, false, 1, 2, 3, 4, 5, 0, 7, 8, 9, 10, 11, 0, 0, 0, Optional.empty());
+    private static final QueryActionStats QUERY_STATS = new QueryActionStats(
+            Optional.of(new QueryStats("id", "", false, false, 1, 2, 3, 4, 5, 0, 7, 8, 9, 10, 11, 0, 0, 0, Optional.empty())),
+            Optional.empty());
     private static final ParsingOptions PARSING_OPTIONS = ParsingOptions.builder().setDecimalLiteralTreatment(AS_DOUBLE).build();
     private static final SqlParser sqlParser = new SqlParser(new SqlParserOptions().allowIdentifierSymbol(COLON, AT_SIGN));
 

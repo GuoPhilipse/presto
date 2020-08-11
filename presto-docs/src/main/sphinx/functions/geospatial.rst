@@ -412,6 +412,17 @@ Accessors
    ``GEOMETRYCOLLECTION(MULTIPOINT(0 0, 1 1), GEOMETRYCOLLECTION(MULTILINESTRING((2 2, 3 3))))``
    would produce ``array[MULTIPOINT(0 0, 1 1), GEOMETRYCOLLECTION(MULTILINESTRING((2 2, 3 3)))]``.
 
+.. function:: flatten_geometry_collections(Geometry) -> array(Geometry)
+
+    Recursively flattens any GeometryCollections in Geometry, returning an array
+    of constituent non-GeometryCollection geometries.  The order of the array is
+    arbitrary and should not be relied upon.  Examples:
+
+    ``POINT (0 0) -> [POINT (0 0)]``,
+    ``MULTIPOINT (0 0, 1 1) -> [MULTIPOINT (0 0, 1 1)]``,
+    ``GEOMETRYCOLLECTION (POINT (0 0), GEOMETRYCOLLECTION (POINT (1 1))) -> [POINT (0 0), POINT (1 1)]``,
+    ``GEOMETRYCOLLECTION EMPTY -> []``.
+
 .. function:: ST_NumPoints(Geometry) -> bigint
 
     Returns the number of points in a geometry. This is an extension to the SQL/MM
@@ -452,6 +463,16 @@ Accessors
 
     Returns the great-circle distance between two points on Earth's surface in kilometers.
 
+.. function:: geometry_as_geojson(Geometry) -> varchar
+
+    Returns the GeoJSON encoded defined by the input geometry.
+    If the geometry is atomic (non-multi) empty, this function would return null.
+
+.. function:: geometry_from_geojson(varchar) -> Geometry
+
+    Returns the geometry type object from the GeoJSON representation.
+    The geometry cannot be empty if it is an atomic (non-multi) geometry type.
+
 Aggregations
 ------------
 .. function:: convex_hull_agg(Geometry) -> Geometry
@@ -485,6 +506,28 @@ represent a valid tile will raise an exception.
 .. function:: bing_tile(quadKey) -> BingTile
 
     Creates a Bing tile object from a quadkey.
+
+.. function:: bing_tile_parent(tile) -> BingTile
+
+    Returns the parent of the Bing tile at one lower zoom level.
+    Throws an exception if tile is at zoom level 0.
+
+.. function:: bing_tile_parent(tile, newZoom) -> BingTile
+
+    Returns the parent of the Bing tile at the specified lower zoom level.
+    Throws an exception if newZoom is less than 0, or newZoom is greater than
+    the tile's zoom.
+
+.. function:: bing_tile_children(tile) -> array(BingTile)
+
+    Returns the children of the Bing tile at one higher zoom level.
+    Throws an exception if tile is at max zoom level.
+
+.. function:: bing_tile_children(tile, newZoom) -> array(BingTile)
+
+    Returns the children of the Bing tile at the specified higher zoom level.
+    Throws an exception if newZoom is greater than the max zoom level, or
+    newZoom is less than the tile's zoom.
 
 .. function:: bing_tile_at(latitude, longitude, zoom_level) -> BingTile
 
@@ -522,3 +565,11 @@ represent a valid tile will raise an exception.
 
     Returns the minimum set of Bing tiles that fully covers a given geometry at
     a given zoom level. Zoom levels from 1 to 23 are supported.
+
+.. function:: geometry_to_dissolved_bing_tiles(geometry, max_zoom_level) -> array(BingTile)
+
+    Returns the minimum set of Bing tiles that fully covers a given geometry at
+    a given zoom level, recursively dissolving full sets of children into parents.
+    This results in a smaller array of tiles of different zoom levels. For example,
+    if the non-dissolved covering is ["00", "01", "02", "03", "10"], the dissolved
+    covering would be ["0", "10"]. Zoom levels from 1 to 23 are supported.

@@ -108,7 +108,7 @@ public class TaskInfoFetcher
         requireNonNull(initialTask, "initialTask is null");
         requireNonNull(errorScheduledExecutor, "errorScheduledExecutor is null");
 
-        this.taskId = initialTask.getTaskStatus().getTaskId();
+        this.taskId = initialTask.getTaskId();
         this.onFail = requireNonNull(onFail, "onFail is null");
         this.taskInfo = new StateMachine<>("task " + taskId, executor, initialTask);
         this.finalTaskInfo = new StateMachine<>("task-" + taskId, executor, Optional.empty());
@@ -176,14 +176,20 @@ public class TaskInfoFetcher
     private synchronized void scheduleUpdate()
     {
         scheduledFuture = updateScheduledExecutor.scheduleWithFixedDelay(() -> {
-            synchronized (this) {
-                // if the previous request still running, don't schedule a new request
-                if (future != null && !future.isDone()) {
-                    return;
+            try {
+                synchronized (this) {
+                    // if the previous request still running, don't schedule a new request
+                    if (future != null && !future.isDone()) {
+                        return;
+                    }
+                }
+                if (nanosSince(lastUpdateNanos.get()).toMillis() >= updateIntervalMillis) {
+                    sendNextRequest();
                 }
             }
-            if (nanosSince(lastUpdateNanos.get()).toMillis() >= updateIntervalMillis) {
-                sendNextRequest();
+            catch (Throwable t) {
+                fatal(t);
+                throw t;
             }
         }, 0, 100, MILLISECONDS);
     }

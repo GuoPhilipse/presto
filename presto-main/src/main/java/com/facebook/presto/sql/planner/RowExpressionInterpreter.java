@@ -70,6 +70,7 @@ import static com.facebook.presto.common.type.TypeSignature.parseTypeSignature;
 import static com.facebook.presto.common.type.TypeUtils.writeNativeValue;
 import static com.facebook.presto.common.type.VarcharType.VARCHAR;
 import static com.facebook.presto.common.type.VarcharType.createVarcharType;
+import static com.facebook.presto.expressions.DynamicFilters.isDynamicFilter;
 import static com.facebook.presto.metadata.CastType.CAST;
 import static com.facebook.presto.metadata.CastType.JSON_TO_ARRAY_CAST;
 import static com.facebook.presto.metadata.CastType.JSON_TO_MAP_CAST;
@@ -259,7 +260,10 @@ public class RowExpressionInterpreter
 
             // do not optimize non-deterministic functions
             if (optimizationLevel.ordinal() < EVALUATED.ordinal() &&
-                    (!functionMetadata.isDeterministic() || hasUnresolvedValue(argumentValues) || resolution.isFailFunction(functionHandle))) {
+                    (!functionMetadata.isDeterministic() ||
+                            hasUnresolvedValue(argumentValues) ||
+                            isDynamicFilter(node) ||
+                            resolution.isFailFunction(functionHandle))) {
                 return call(node.getDisplayName(), functionHandle, node.getType(), toRowExpressions(argumentValues, node.getArguments()));
             }
 
@@ -604,50 +608,52 @@ public class RowExpressionInterpreter
                     return insertArguments((MethodHandle) values.get(values.size() - 1), 0, values.subList(0, values.size() - 1).toArray());
                 }
                 case SWITCH: {
-                    Object value = processWithExceptionHandling(node.getArguments().get(0), context);
-
                     List<RowExpression> whenClauses;
-                    Object elseValue;
+                    Object elseValue = null;
                     RowExpression last = node.getArguments().get(node.getArguments().size() - 1);
                     if (last instanceof SpecialFormExpression && ((SpecialFormExpression) last).getForm().equals(WHEN)) {
                         whenClauses = node.getArguments().subList(1, node.getArguments().size());
-                        elseValue = null;
                     }
                     else {
                         whenClauses = node.getArguments().subList(1, node.getArguments().size() - 1);
-                        elseValue = processWithExceptionHandling(last, context);
-                    }
-
-                    if (value == null) {
-                        return elseValue;
                     }
 
                     List<RowExpression> simplifiedWhenClauses = new ArrayList<>();
-                    for (RowExpression whenClause : whenClauses) {
-                        checkArgument(whenClause instanceof SpecialFormExpression && ((SpecialFormExpression) whenClause).getForm().equals(WHEN));
+                    Object value = processWithExceptionHandling(node.getArguments().get(0), context);
+                    if (value != null) {
+                        for (RowExpression whenClause : whenClauses) {
+                            checkArgument(whenClause instanceof SpecialFormExpression && ((SpecialFormExpression) whenClause).getForm().equals(WHEN));
 
-                        RowExpression operand = ((SpecialFormExpression) whenClause).getArguments().get(0);
-                        RowExpression result = ((SpecialFormExpression) whenClause).getArguments().get(1);
+                            RowExpression operand = ((SpecialFormExpression) whenClause).getArguments().get(0);
+                            RowExpression result = ((SpecialFormExpression) whenClause).getArguments().get(1);
 
-                        Object operandValue = processWithExceptionHandling(operand, context);
-                        Object resultValue = processWithExceptionHandling(result, context);
+                            Object operandValue = processWithExceptionHandling(operand, context);
 
-                        // call equals(value, operand)
-                        if (operandValue instanceof RowExpression || value instanceof RowExpression) {
-                            // cannot fully evaluate, add updated whenClause
-                            simplifiedWhenClauses.add(new SpecialFormExpression(WHEN, whenClause.getType(), toRowExpression(operandValue, operand), toRowExpression(resultValue, result)));
-                        }
-                        else if (operandValue != null) {
-                            Boolean isEqual = (Boolean) invokeOperator(
-                                    EQUAL,
-                                    ImmutableList.of(node.getArguments().get(0).getType(), operand.getType()),
-                                    ImmutableList.of(value, operandValue));
-                            if (isEqual != null && isEqual) {
-                                // condition is true, use this as elseValue
-                                elseValue = resultValue;
-                                break;
+                            // call equals(value, operand)
+                            if (operandValue instanceof RowExpression || value instanceof RowExpression) {
+                                // cannot fully evaluate, add updated whenClause
+                                simplifiedWhenClauses.add(new SpecialFormExpression(WHEN, whenClause.getType(), toRowExpression(operandValue, operand), toRowExpression(processWithExceptionHandling(result, context), result)));
+                            }
+                            else if (operandValue != null) {
+                                Boolean isEqual = (Boolean) invokeOperator(
+                                        EQUAL,
+                                        ImmutableList.of(node.getArguments().get(0).getType(), operand.getType()),
+                                        ImmutableList.of(value, operandValue));
+                                if (isEqual != null && isEqual) {
+                                    if (simplifiedWhenClauses.isEmpty()) {
+                                        // this is the left-most true predicate. So return it.
+                                        return processWithExceptionHandling(result, context);
+                                    }
+
+                                    elseValue = processWithExceptionHandling(result, context);
+                                    break; // Done we found the last match. Don't need to go any further.
+                                }
                             }
                         }
+                    }
+
+                    if (elseValue == null) {
+                        elseValue = processWithExceptionHandling(last, context);
                     }
 
                     if (simplifiedWhenClauses.isEmpty()) {
@@ -657,7 +663,7 @@ public class RowExpressionInterpreter
                     ImmutableList.Builder<RowExpression> argumentsBuilder = ImmutableList.builder();
                     argumentsBuilder.add(toRowExpression(value, node.getArguments().get(0)))
                             .addAll(simplifiedWhenClauses)
-                            .add(toRowExpression(elseValue, node.getArguments().get(node.getArguments().size() - 1)));
+                            .add(toRowExpression(elseValue, last));
                     return new SpecialFormExpression(SWITCH, node.getType(), argumentsBuilder.build());
                 }
                 default:
@@ -844,11 +850,12 @@ public class RowExpressionInterpreter
             checkArgument(resolution.isLikeFunction(callExpression.getFunctionHandle()));
             checkArgument(callExpression.getArguments().size() == 2);
             RowExpression likePatternExpression = callExpression.getArguments().get(1);
-            checkArgument(
-                    (likePatternExpression instanceof CallExpression &&
-                            (((CallExpression) likePatternExpression).getFunctionHandle().equals(resolution.likePatternFunction()) ||
-                                    (resolution.isCastFunction(((CallExpression) likePatternExpression).getFunctionHandle())))),
-                    "expect a like_pattern function or a cast function");
+            if (!(likePatternExpression instanceof CallExpression &&
+                    (((CallExpression) likePatternExpression).getFunctionHandle().equals(resolution.likePatternFunction()) ||
+                            (resolution.isCastFunction(((CallExpression) likePatternExpression).getFunctionHandle()))))) {
+                // expression was already optimized
+                return notChanged();
+            }
             Object value = argumentValues.get(0);
             Object possibleCompiledPattern = argumentValues.get(1);
 

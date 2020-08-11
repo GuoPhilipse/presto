@@ -55,6 +55,7 @@ import static com.facebook.presto.array.Arrays.ExpansionOption.PRESERVE;
 import static com.facebook.presto.array.Arrays.ensureCapacity;
 import static com.facebook.presto.operator.MoreByteArrays.fill;
 import static com.facebook.presto.operator.UncheckedByteArrays.setByteUnchecked;
+import static com.google.common.base.MoreObjects.toStringHelper;
 import static com.google.common.base.Verify.verify;
 import static io.airlift.slice.SizeOf.SIZE_OF_BYTE;
 import static java.lang.String.format;
@@ -64,6 +65,9 @@ import static java.util.Objects.requireNonNull;
 public abstract class AbstractBlockEncodingBuffer
         implements BlockEncodingBuffer
 {
+    @VisibleForTesting
+    public static final double GRACE_FACTOR_FOR_MAX_BUFFER_CAPACITY = 1.2f;
+
     // The allocator for internal buffers
     protected final ArrayAllocator bufferAllocator;
 
@@ -204,7 +208,7 @@ public abstract class AbstractBlockEncodingBuffer
         this.positionsOffset = 0;
         this.positionsMapped = false;
 
-        double decodedBlockPageSizeFraction = (decodedBlockNode.getEstimatedSerializedSizeInBytes() - decodedBlockNode.getChildrenEstimatedSerializedSizeInBytes()) / ((double) estimatedSerializedPageSize);
+        double decodedBlockPageSizeFraction = (decodedBlockNode.getEstimatedSerializedSizeInBytes()) / ((double) estimatedSerializedPageSize);
 
         setupDecodedBlockAndMapPositions(decodedBlockNode, partitionBufferCapacity, decodedBlockPageSizeFraction);
     }
@@ -217,9 +221,45 @@ public abstract class AbstractBlockEncodingBuffer
         this.flushed = false;
     }
 
+    @Override
+    public String toString()
+    {
+        return toStringHelper(this)
+                .add("isNested", isNested)
+                .add("decodedBlock", mappedPositions == null ? "null" : decodedBlock)
+                .add("positionCount", positionCount)
+                .add("batchSize", batchSize)
+                .add("positionsOffset", positionsOffset)
+                .add("bufferedPositionCount", bufferedPositionCount)
+                .add("positionsMapped", positionsMapped)
+                .add("flushed", flushed)
+                .add("positionsCapacity", positions == null ? 0 : positions.length)
+                .add("mappedPositionsCapacity", mappedPositions == null ? 0 : mappedPositions.length)
+                .add("estimatedNullsBufferMaxCapacity", estimatedNullsBufferMaxCapacity)
+                .add("nullsBufferCapacity", nullsBuffer == null ? 0 : nullsBuffer.length)
+                .add("nullsBufferIndex", nullsBufferIndex)
+                .add("remainingNullsCount", remainingNullsCount)
+                .add("hasEncodedNulls", hasEncodedNulls)
+                .toString();
+    }
+
+    @VisibleForTesting
+    abstract int getEstimatedValueBufferMaxCapacity();
+
+    @VisibleForTesting
+    int getEstimatedNullsBufferMaxCapacity()
+    {
+        return estimatedNullsBufferMaxCapacity;
+    }
+
     protected void setEstimatedNullsBufferMaxCapacity(int estimatedNullsBufferMaxCapacity)
     {
         this.estimatedNullsBufferMaxCapacity = estimatedNullsBufferMaxCapacity;
+    }
+
+    protected static int getEstimatedBufferMaxCapacity(double targetBufferSize, int unitSize, int positionSize)
+    {
+        return (int) (targetBufferSize * unitSize / positionSize * GRACE_FACTOR_FOR_MAX_BUFFER_CAPACITY);
     }
 
     /**

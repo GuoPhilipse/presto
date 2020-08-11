@@ -137,7 +137,7 @@ public class TestCostCalculator
                 new NodeTaskMap(finalizerService));
         PartitioningProviderManager partitioningProviderManager = new PartitioningProviderManager();
         nodePartitioningManager = new NodePartitioningManager(nodeScheduler, partitioningProviderManager);
-        planFragmenter = new PlanFragmenter(metadata, nodePartitioningManager, new QueryManagerConfig(), new SqlParser());
+        planFragmenter = new PlanFragmenter(metadata, nodePartitioningManager, new QueryManagerConfig(), new SqlParser(), new FeaturesConfig());
     }
 
     @AfterClass(alwaysRun = true)
@@ -837,7 +837,8 @@ public class TestCostCalculator
                 Optional.empty(),
                 Optional.empty(),
                 Optional.empty(),
-                Optional.of(distributionType));
+                Optional.of(distributionType),
+                ImmutableMap.of());
     }
 
     private SubPlan fragment(Plan plan)

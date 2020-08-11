@@ -47,6 +47,8 @@ public abstract class AbstractMapBlock
     protected final MethodHandle keyBlockNativeEquals;
     protected final MethodHandle keyBlockHashCode;
 
+    protected volatile long logicalSizeInBytes;
+
     public AbstractMapBlock(Type keyType, MethodHandle keyNativeHashCode, MethodHandle keyBlockNativeEquals, MethodHandle keyBlockHashCode)
     {
         this.keyType = requireNonNull(keyType, "keyType is null");
@@ -121,7 +123,7 @@ public abstract class AbstractMapBlock
             newPosition++;
         }
 
-        int[] rawHashTables = getHashTables().get().orElse(null);
+        int[] rawHashTables = getHashTables().get();
         int[] newRawHashTables = null;
         int newHashTableEntries = newOffsets[newOffsets.length - 1] * HASH_MULTIPLIER;
         if (rawHashTables != null) {
@@ -192,6 +194,31 @@ public abstract class AbstractMapBlock
     }
 
     @Override
+    public long getLogicalSizeInBytes()
+    {
+        if (logicalSizeInBytes < 0) {
+            calculateLogicalSize();
+        }
+        return logicalSizeInBytes;
+    }
+
+    @Override
+    public long getRegionLogicalSizeInBytes(int position, int length)
+    {
+        int positionCount = getPositionCount();
+        checkValidRegion(positionCount, position, length);
+
+        int entriesStart = getOffsets()[getOffsetBase() + position];
+        int entriesEnd = getOffsets()[getOffsetBase() + position + length];
+        int entryCount = entriesEnd - entriesStart;
+
+        return getRawKeyBlock().getRegionLogicalSizeInBytes(entriesStart, entryCount) +
+                getRawValueBlock().getRegionLogicalSizeInBytes(entriesStart, entryCount) +
+                (Integer.BYTES + Byte.BYTES) * length +
+                Integer.BYTES * HASH_MULTIPLIER * entryCount;
+    }
+
+    @Override
     public long getPositionsSizeInBytes(boolean[] positions)
     {
         // We can use either the getRegionSizeInBytes or getPositionsSizeInBytes
@@ -237,7 +264,7 @@ public abstract class AbstractMapBlock
         boolean[] mapIsNull = getMapIsNull();
         boolean[] newMapIsNull = mapIsNull == null ? null : compactArray(mapIsNull, position + getOffsetBase(), length);
 
-        int[] rawHashTables = getHashTables().get().orElse(null);
+        int[] rawHashTables = getHashTables().get();
         int[] newRawHashTables = null;
         int expectedNewHashTableEntries = (endValueOffset - startValueOffset) * HASH_MULTIPLIER;
         if (rawHashTables != null) {
@@ -314,7 +341,7 @@ public abstract class AbstractMapBlock
         Block newKeys = getRawKeyBlock().copyRegion(startValueOffset, valueLength);
         Block newValues = getRawValueBlock().copyRegion(startValueOffset, valueLength);
 
-        int[] rawHashTables = getHashTables().get().orElse(null);
+        int[] rawHashTables = getHashTables().get();
         int[] newRawHashTables = null;
         int expectedNewHashTableEntries = (endValueOffset - startValueOffset) * HASH_MULTIPLIER;
         if (rawHashTables != null) {
@@ -373,7 +400,7 @@ public abstract class AbstractMapBlock
 
     public boolean isHashTablesPresent()
     {
-        return getHashTables().get().isPresent();
+        return getHashTables().get() != null;
     }
 
     private void checkReadablePosition(int position)
@@ -410,9 +437,10 @@ public abstract class AbstractMapBlock
             this.expectedHashTableCount = expectedHashTableCount;
         }
 
-        Optional<int[]> get()
+        @Nullable
+        int[] get()
         {
-            return Optional.ofNullable(hashTables);
+            return hashTables;
         }
 
         void set(int[] hashTables)
@@ -476,5 +504,16 @@ public abstract class AbstractMapBlock
                 keyBlockNativeEquals,
                 keyNativeHashCode,
                 keyBlockHashCode);
+    }
+
+    private void calculateLogicalSize()
+    {
+        int entriesStart = getOffset(0);
+        int entriesEnd = getOffset(getPositionCount());
+        int entryCount = entriesEnd - entriesStart;
+        logicalSizeInBytes = getRawKeyBlock().getRegionLogicalSizeInBytes(entriesStart, entryCount) +
+                getRawValueBlock().getRegionLogicalSizeInBytes(entriesStart, entryCount) +
+                (Integer.BYTES + Byte.BYTES) * (long) this.getPositionCount() +
+                Integer.BYTES * HASH_MULTIPLIER * (long) entryCount;
     }
 }

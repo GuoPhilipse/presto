@@ -29,6 +29,7 @@ import com.facebook.presto.spi.PrestoException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.databind.node.ArrayNode;
+import com.fasterxml.jackson.databind.node.ObjectNode;
 import com.google.common.collect.ImmutableList;
 import io.airlift.slice.Slice;
 import io.airlift.slice.Slices;
@@ -44,6 +45,7 @@ import java.util.List;
 
 import static com.facebook.presto.druid.DruidErrorCode.DRUID_BROKER_RESULT_ERROR;
 import static com.google.common.collect.ImmutableList.toImmutableList;
+import static java.lang.Float.floatToRawIntBits;
 import static java.util.Objects.requireNonNull;
 
 public class DruidBrokerPageSource
@@ -121,6 +123,12 @@ public class DruidBrokerPageSource
                 }
                 else {
                     JsonNode rootNode = OBJECT_MAPPER.readTree(readLine);
+                    if (!(rootNode instanceof ArrayNode)) {
+                        if (rootNode instanceof ObjectNode) {
+                            throw new PrestoException(DRUID_BROKER_RESULT_ERROR, ((ObjectNode) rootNode).findValue("errorMessage").asText());
+                        }
+                        throw new PrestoException(DRUID_BROKER_RESULT_ERROR, rootNode.toString());
+                    }
                     ArrayNode arrayNode = (ArrayNode) rootNode;
                     for (int i = 0; i < columnHandles.size(); i++) {
                         Type type = columnTypes.get(i);
@@ -137,7 +145,7 @@ public class DruidBrokerPageSource
                             type.writeDouble(blockBuilder, value.doubleValue());
                         }
                         else if (type instanceof RealType) {
-                            type.writeLong(blockBuilder, value.longValue());
+                            type.writeLong(blockBuilder, floatToRawIntBits(value.floatValue()));
                         }
                         else if (type instanceof TimestampType) {
                             DateTimeFormatter formatter = ISODateTimeFormat.dateTimeParser()

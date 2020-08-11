@@ -49,8 +49,6 @@ import java.util.concurrent.atomic.AtomicReference;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableSet.toImmutableSet;
 import static com.google.common.collect.Iterables.transform;
-import static io.airlift.units.DataSize.succinctBytes;
-import static io.airlift.units.Duration.succinctNanos;
 import static java.util.Objects.requireNonNull;
 import static java.util.concurrent.TimeUnit.NANOSECONDS;
 import static java.util.stream.Collectors.toList;
@@ -195,19 +193,7 @@ public class PipelineContext
         // merge the operator stats into the operator summary
         List<OperatorStats> operators = driverStats.getOperatorStats();
         for (OperatorStats operator : operators) {
-            // TODO: replace with ConcurrentMap.compute() when we migrate to java 8
-            OperatorStats updated;
-            OperatorStats current;
-            do {
-                current = operatorSummaries.get(operator.getOperatorId());
-                if (current != null) {
-                    updated = current.add(operator);
-                }
-                else {
-                    updated = operator;
-                }
-            }
-            while (!compareAndSet(operatorSummaries, operator.getOperatorId(), current, updated));
+            operatorSummaries.compute(operator.getOperatorId(), (operatorId, summaryStats) -> summaryStats == null ? operator : summaryStats.add(operator));
         }
 
         rawInputDataSize.update(driverStats.getRawInputDataSize().toBytes());
@@ -445,31 +431,31 @@ public class PipelineContext
                 pipelineStatus.getBlockedDrivers(),
                 completedDrivers,
 
-                succinctBytes(pipelineMemoryContext.getUserMemory()),
-                succinctBytes(pipelineMemoryContext.getRevocableMemory()),
-                succinctBytes(pipelineMemoryContext.getSystemMemory()),
+                pipelineMemoryContext.getUserMemory(),
+                pipelineMemoryContext.getRevocableMemory(),
+                pipelineMemoryContext.getSystemMemory(),
 
                 queuedTime.snapshot(),
                 elapsedTime.snapshot(),
 
-                succinctNanos(totalScheduledTime),
-                succinctNanos(totalCpuTime),
-                succinctNanos(totalBlockedTime),
+                totalScheduledTime,
+                totalCpuTime,
+                totalBlockedTime,
                 fullyBlocked,
                 blockedReasons,
 
-                succinctBytes(totalAllocation),
+                totalAllocation,
 
-                succinctBytes(rawInputDataSize),
+                rawInputDataSize,
                 rawInputPositions,
 
-                succinctBytes(processedInputDataSize),
+                processedInputDataSize,
                 processedInputPositions,
 
-                succinctBytes(outputDataSize),
+                outputDataSize,
                 outputPositions,
 
-                succinctBytes(physicalWrittenDataSize),
+                physicalWrittenDataSize,
 
                 ImmutableList.copyOf(operatorSummaries.values()),
                 drivers);
@@ -485,15 +471,6 @@ public class PipelineContext
         return drivers.stream()
                 .map(driver -> driver.accept(visitor, context))
                 .collect(toList());
-    }
-
-    private static <K, V> boolean compareAndSet(ConcurrentMap<K, V> map, K key, V oldValue, V newValue)
-    {
-        if (oldValue == null) {
-            return map.putIfAbsent(key, newValue) == null;
-        }
-
-        return map.replace(key, oldValue, newValue);
     }
 
     @VisibleForTesting

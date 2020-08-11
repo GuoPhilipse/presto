@@ -65,6 +65,7 @@ import static com.facebook.presto.common.type.DoubleType.DOUBLE;
 import static com.facebook.presto.common.type.IntegerType.INTEGER;
 import static com.facebook.presto.common.type.VarcharType.createUnboundedVarcharType;
 import static com.facebook.presto.expressions.LogicalRowExpressions.TRUE_CONSTANT;
+import static com.facebook.presto.hive.CacheQuotaRequirement.NO_CACHE_REQUIREMENT;
 import static com.facebook.presto.hive.HiveColumnHandle.ColumnType.REGULAR;
 import static com.facebook.presto.hive.HiveCompressionCodec.NONE;
 import static com.facebook.presto.hive.HiveQueryRunner.HIVE_CATALOG;
@@ -243,7 +244,11 @@ public class TestHivePageSink
                 ImmutableMap.of(),
                 Optional.empty(),
                 false,
-                Optional.empty());
+                Optional.empty(),
+                NO_CACHE_REQUIREMENT,
+                Optional.empty(),
+                ImmutableMap.of());
+
         TableHandle tableHandle = new TableHandle(
                 new ConnectorId(HIVE_CATALOG),
                 new HiveTableHandle(SCHEMA_NAME, TABLE_NAME),
@@ -262,7 +267,8 @@ public class TestHivePageSink
                         Optional.empty(),
                         Optional.empty(),
                         false,
-                        "layout")));
+                        "layout",
+                        Optional.empty())));
         HivePageSourceProvider provider = new HivePageSourceProvider(config, createTestHdfsEnvironment(config, metastoreClientConfig), getDefaultHiveRecordCursorProvider(config, metastoreClientConfig), getDefaultHiveBatchPageSourceFactories(config, metastoreClientConfig), getDefaultHiveSelectivePageSourceFactories(config, metastoreClientConfig), TYPE_MANAGER, ROW_EXPRESSION_SERVICE);
         return provider.createPageSource(transaction, getSession(config), split, tableHandle.getLayout().get(), ImmutableList.copyOf(getColumnHandles()), NON_CACHEABLE);
     }
@@ -285,7 +291,8 @@ public class TestHivePageSink
                 Optional.empty(),
                 ImmutableList.of(),
                 "test",
-                ImmutableMap.of());
+                ImmutableMap.of(),
+                Optional.empty());
         JsonCodec<PartitionUpdate> partitionUpdateCodec = JsonCodec.jsonCodec(PartitionUpdate.class);
         HdfsEnvironment hdfsEnvironment = createTestHdfsEnvironment(config, metastoreClientConfig);
         HivePageSinkProvider provider = new HivePageSinkProvider(
@@ -312,7 +319,7 @@ public class TestHivePageSink
         return new TestingConnectorSession(new HiveSessionProperties(config, new OrcFileWriterConfig(), new ParquetFileWriterConfig()).getSessionProperties());
     }
 
-    private static List<HiveColumnHandle> getColumnHandles()
+    public static List<HiveColumnHandle> getColumnHandles()
     {
         ImmutableList.Builder<HiveColumnHandle> handles = ImmutableList.builder();
         List<LineItemColumn> columns = getTestColumns();

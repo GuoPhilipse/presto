@@ -18,6 +18,7 @@ import com.esri.core.geometry.Geometry;
 import com.esri.core.geometry.GeometryCursor;
 import com.esri.core.geometry.GeometryEngine;
 import com.esri.core.geometry.MultiVertexGeometry;
+import com.esri.core.geometry.Operator;
 import com.esri.core.geometry.Point;
 import com.esri.core.geometry.Polygon;
 import com.esri.core.geometry.ogc.OGCConcreteGeometryCollection;
@@ -35,6 +36,8 @@ import org.locationtech.jts.geom.impl.PackedCoordinateSequenceFactory;
 import org.locationtech.jts.io.ParseException;
 import org.locationtech.jts.io.WKTReader;
 import org.locationtech.jts.io.WKTWriter;
+import org.locationtech.jts.io.geojson.GeoJsonReader;
+import org.locationtech.jts.io.geojson.GeoJsonWriter;
 import org.locationtech.jts.operation.IsSimpleOp;
 import org.locationtech.jts.operation.valid.IsValidOp;
 import org.locationtech.jts.operation.valid.TopologyValidationError;
@@ -44,6 +47,7 @@ import java.util.Deque;
 import java.util.HashSet;
 import java.util.Iterator;
 import java.util.NoSuchElementException;
+import java.util.Optional;
 import java.util.Set;
 
 import static com.facebook.presto.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
@@ -54,6 +58,12 @@ public final class GeometryUtils
 {
     private static final CoordinateSequenceFactory COORDINATE_SEQUENCE_FACTORY = new PackedCoordinateSequenceFactory();
     private static final GeometryFactory GEOMETRY_FACTORY = new GeometryFactory(COORDINATE_SEQUENCE_FACTORY);
+    private static final Set<String> ATOMIC_GEOMETRY_TYPES = new HashSet<>();
+    static {
+        ATOMIC_GEOMETRY_TYPES.add("LineString");
+        ATOMIC_GEOMETRY_TYPES.add("Polygon");
+        ATOMIC_GEOMETRY_TYPES.add("Point");
+    }
 
     private GeometryUtils() {}
 
@@ -66,16 +76,6 @@ public final class GeometryUtils
     private static double translateFromAVNaN(double n)
     {
         return n < -1.0E38D ? (0.0D / 0.0) : n;
-    }
-
-    /**
-     * Copy of com.esri.core.geometry.Interop.translateToAVNaN
-     * <p>
-     * JtsGeometrySerde#serialize must serialize NaN's the same way ESRI library does to achieve binary compatibility
-     */
-    public static double translateToAVNaN(double n)
-    {
-        return (Double.isNaN(n)) ? -Double.MAX_VALUE : n;
     }
 
     public static boolean isEsriNaN(double d)
@@ -239,6 +239,26 @@ public final class GeometryUtils
         return true;
     }
 
+    public static org.locationtech.jts.geom.Geometry jtsGeometryFromJson(String json)
+    {
+        try {
+            return new GeoJsonReader().read(json);
+        }
+        catch (ParseException | IllegalArgumentException e) {
+            throw new PrestoException(INVALID_FUNCTION_ARGUMENT, "Invalid GeoJSON: " + e.getMessage(), e);
+        }
+    }
+
+    public static Optional<String> jsonFromJtsGeometry(org.locationtech.jts.geom.Geometry geometry)
+    {
+        if (ATOMIC_GEOMETRY_TYPES.contains(geometry.getGeometryType()) && geometry.isEmpty()) {
+            return Optional.empty();
+        }
+        else {
+            return Optional.of(new GeoJsonWriter().write(geometry));
+        }
+    }
+
     public static org.locationtech.jts.geom.Geometry jtsGeometryFromWkt(String wkt)
     {
         try {
@@ -289,14 +309,14 @@ public final class GeometryUtils
         return GEOMETRY_FACTORY.createPolygon();
     }
 
-    public static String getGeometryInvalidReason(org.locationtech.jts.geom.Geometry geometry)
+    public static Optional<String> getGeometryInvalidReason(org.locationtech.jts.geom.Geometry geometry)
     {
         IsValidOp validOp = new IsValidOp(geometry);
         IsSimpleOp simpleOp = new IsSimpleOp(geometry);
         try {
             TopologyValidationError err = validOp.getValidationError();
             if (err != null) {
-                return err.getMessage();
+                return Optional.of(err.getMessage());
             }
         }
         catch (UnsupportedOperationException e) {
@@ -329,9 +349,9 @@ public final class GeometryUtils
                     throw new PrestoException(INVALID_FUNCTION_ARGUMENT, format("Unknown geometry type: %s", geometryType));
             }
             org.locationtech.jts.geom.Coordinate nonSimpleLocation = simpleOp.getNonSimpleLocation();
-            return format("[%s] %s: (%s %s)", geometryType, errorDescription, nonSimpleLocation.getX(), nonSimpleLocation.getY());
+            return Optional.of(format("[%s] %s: (%s %s)", geometryType, errorDescription, nonSimpleLocation.getX(), nonSimpleLocation.getY()));
         }
-        return null;
+        return Optional.empty();
     }
 
     /**
@@ -355,6 +375,27 @@ public final class GeometryUtils
             return ImmutableList.of();
         }
         return () -> new GeometryCollectionIterator(geometry);
+    }
+
+    public static void accelerateGeometry(OGCGeometry ogcGeometry, Operator relateOperator)
+    {
+        accelerateGeometry(ogcGeometry, relateOperator, Geometry.GeometryAccelerationDegree.enumMild);
+    }
+
+    public static void accelerateGeometry(
+            OGCGeometry ogcGeometry,
+            Operator relateOperator,
+            Geometry.GeometryAccelerationDegree accelerationDegree)
+    {
+        // Recurse into GeometryCollections
+        GeometryCursor cursor = ogcGeometry.getEsriGeometryCursor();
+        while (true) {
+            Geometry esriGeometry = cursor.next();
+            if (esriGeometry == null) {
+                break;
+            }
+            relateOperator.accelerateGeometry(esriGeometry, null, accelerationDegree);
+        }
     }
 
     private static class GeometryCollectionIterator

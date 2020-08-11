@@ -41,6 +41,7 @@ import com.google.inject.Module;
 import com.google.inject.Scopes;
 import org.testng.annotations.Test;
 
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 
@@ -48,6 +49,7 @@ import static com.facebook.airlift.configuration.ConfigBinder.configBinder;
 import static com.facebook.airlift.json.JsonBinder.jsonBinder;
 import static com.facebook.airlift.json.JsonCodecBinder.jsonCodecBinder;
 import static com.facebook.presto.common.type.BigintType.BIGINT;
+import static com.facebook.presto.hive.CacheQuotaRequirement.NO_CACHE_REQUIREMENT;
 import static com.facebook.presto.hive.HiveType.HIVE_LONG;
 import static com.facebook.presto.hive.HiveType.HIVE_STRING;
 import static com.facebook.presto.spi.schedule.NodeSelectionStrategy.NO_PREFERENCE;
@@ -62,6 +64,7 @@ public class TestHiveSplit
     {
         ImmutableList<HivePartitionKey> partitionKeys = ImmutableList.of(new HivePartitionKey("a", "apple"), new HivePartitionKey("b", "42"));
         ImmutableList<HostAddress> addresses = ImmutableList.of(HostAddress.fromParts("127.0.0.1", 44), HostAddress.fromParts("127.0.0.1", 45));
+        Map<String, String> customSplitInfo = ImmutableMap.of("key", "value");
         HiveSplit expected = new HiveSplit(
                 "db",
                 "table",
@@ -89,7 +92,14 @@ public class TestHiveSplit
                         16,
                         ImmutableList.of(new HiveColumnHandle("col", HIVE_LONG, BIGINT.getTypeSignature(), 5, ColumnType.REGULAR, Optional.of("comment"))))),
                 false,
-                Optional.empty());
+                Optional.empty(),
+                NO_CACHE_REQUIREMENT,
+                Optional.of(EncryptionInformation.fromEncryptionMetadata(DwrfEncryptionMetadata.forPerField(
+                        ImmutableMap.of("field1", "test1".getBytes()),
+                        ImmutableMap.of(),
+                        "test_algo",
+                        "test_provider"))),
+                customSplitInfo);
 
         JsonCodec<HiveSplit> codec = getJsonCodec();
         String json = codec.toJson(expected);
@@ -110,6 +120,9 @@ public class TestHiveSplit
         assertEquals(actual.getBucketConversion(), expected.getBucketConversion());
         assertEquals(actual.getNodeSelectionStrategy(), expected.getNodeSelectionStrategy());
         assertEquals(actual.isS3SelectPushdownEnabled(), expected.isS3SelectPushdownEnabled());
+        assertEquals(actual.getCacheQuotaRequirement(), expected.getCacheQuotaRequirement());
+        assertEquals(actual.getEncryptionInformation(), expected.getEncryptionInformation());
+        assertEquals(actual.getCustomSplitInfo(), expected.getCustomSplitInfo());
     }
 
     private JsonCodec<HiveSplit> getJsonCodec()

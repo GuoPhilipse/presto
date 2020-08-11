@@ -17,6 +17,7 @@ import com.facebook.presto.Session;
 import com.facebook.presto.SystemSessionProperties;
 import com.facebook.presto.tpch.TpchPlugin;
 import com.google.common.collect.ImmutableMap;
+import org.testng.annotations.Test;
 
 import java.nio.file.Paths;
 
@@ -40,6 +41,7 @@ public class TestDistributedSpilledQueries
                 .setSystemProperty(SystemSessionProperties.TASK_CONCURRENCY, "2")
                 .setSystemProperty(SystemSessionProperties.SPILL_ENABLED, "true")
                 .setSystemProperty(SystemSessionProperties.AGGREGATION_OPERATOR_UNSPILL_MEMORY_LIMIT, "128kB")
+                .setSystemProperty(SystemSessionProperties.USE_MARK_DISTINCT, "false")
                 .build();
 
         ImmutableMap<String, String> extraProperties = ImmutableMap.<String, String>builder()
@@ -62,6 +64,13 @@ public class TestDistributedSpilledQueries
         }
     }
 
+    @Test(enabled = false)
+    public void testJoinPredicatePushdown()
+    {
+        // TODO: disabled until join spilling is reworked
+    }
+
+    @Test(enabled = false)
     @Override
     public void testAssignUniqueId()
     {
@@ -69,13 +78,13 @@ public class TestDistributedSpilledQueries
         //       due to long running query test created many spill files on disk.
     }
 
-    @Override
+    @Test(enabled = false)
     public void testLimitWithJoin()
     {
         // TODO: disable until https://github.com/prestodb/presto/issues/13859 is resolved.
     }
 
-    @Override
+    @Test(enabled = false)
     public void testJoinDoubleClauseWithRightOverlap()
     {
         // TODO: disable until https://github.com/prestodb/presto/issues/13859 is resolved.

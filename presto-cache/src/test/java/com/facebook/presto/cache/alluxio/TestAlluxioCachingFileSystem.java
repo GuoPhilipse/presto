@@ -13,7 +13,6 @@
  */
 package com.facebook.presto.cache.alluxio;
 
-import alluxio.exception.ExceptionMessage;
 import alluxio.metrics.MetricKey;
 import alluxio.metrics.MetricsSystem;
 import alluxio.util.io.FileUtils;
@@ -26,8 +25,6 @@ import org.apache.hadoop.fs.FSDataInputStream;
 import org.apache.hadoop.fs.FSDataOutputStream;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.Path;
-import org.apache.hadoop.fs.PositionedReadable;
-import org.apache.hadoop.fs.Seekable;
 import org.apache.hadoop.fs.permission.FsPermission;
 import org.apache.hadoop.util.Progressable;
 import org.testng.annotations.AfterClass;
@@ -35,12 +32,11 @@ import org.testng.annotations.BeforeClass;
 import org.testng.annotations.BeforeMethod;
 import org.testng.annotations.Test;
 
-import java.io.ByteArrayInputStream;
-import java.io.EOFException;
+import java.io.File;
 import java.io.IOException;
-import java.io.InputStream;
 import java.net.URI;
 import java.net.URISyntaxException;
+import java.nio.file.AccessDeniedException;
 import java.util.HashMap;
 import java.util.Map;
 import java.util.Optional;
@@ -50,10 +46,13 @@ import java.util.concurrent.ExecutionException;
 import static com.facebook.presto.cache.CacheType.ALLUXIO;
 import static com.facebook.presto.cache.TestingCacheUtils.stressTest;
 import static com.facebook.presto.cache.TestingCacheUtils.validateBuffer;
+import static com.facebook.presto.hive.CacheQuota.NO_CACHE_CONSTRAINTS;
 import static com.google.common.base.Preconditions.checkState;
 import static io.airlift.units.DataSize.Unit.KILOBYTE;
+import static io.airlift.units.DataSize.Unit.MEGABYTE;
 import static java.nio.file.Files.createTempDirectory;
 import static org.testng.Assert.assertEquals;
+import static org.testng.Assert.assertTrue;
 
 @Test(singleThreaded = true)
 public class TestAlluxioCachingFileSystem
@@ -90,15 +89,30 @@ public class TestAlluxioCachingFileSystem
     }
 
     @Test(timeOut = 30_000)
-    public void testBasic()
+    public void testBasicWithValidationEnabled()
+            throws Exception
+    {
+        testBasic(true);
+    }
+
+    @Test(timeOut = 30_000)
+    public void testBasicWithValidationDisabled()
+            throws Exception
+    {
+        testBasic(false);
+    }
+
+    private void testBasic(boolean validationEnabled)
             throws Exception
     {
         CacheConfig cacheConfig = new CacheConfig()
                 .setCacheType(ALLUXIO)
                 .setCachingEnabled(true)
-                .setBaseDirectory(cacheDirectory);
+                .setBaseDirectory(cacheDirectory)
+                .setValidationEnabled(validationEnabled);
         AlluxioCacheConfig alluxioCacheConfig = new AlluxioCacheConfig();
-        AlluxioCachingFileSystem fileSystem = cachingFileSystem(cacheConfig, alluxioCacheConfig);
+        Configuration configuration = getHdfsConfiguration(cacheConfig, alluxioCacheConfig);
+        AlluxioCachingFileSystem fileSystem = cachingFileSystem(configuration);
         byte[] buffer = new byte[PAGE_SIZE * 2];
         int pageOffset = PAGE_SIZE;
 
@@ -161,8 +175,8 @@ public class TestAlluxioCachingFileSystem
                 .setBaseDirectory(cacheDirectory);
         AlluxioCacheConfig alluxioCacheConfig = new AlluxioCacheConfig()
                 .setMaxCacheSize(new DataSize(10, KILOBYTE));
-
-        AlluxioCachingFileSystem cachingFileSystem = cachingFileSystem(cacheConfig, alluxioCacheConfig);
+        Configuration configuration = getHdfsConfiguration(cacheConfig, alluxioCacheConfig);
+        AlluxioCachingFileSystem cachingFileSystem = cachingFileSystem(configuration);
         stressTest(data, (position, buffer, offset, length) -> {
             try {
                 readFully(cachingFileSystem, position, buffer, offset, length);
@@ -171,6 +185,54 @@ public class TestAlluxioCachingFileSystem
                 e.printStackTrace();
             }
         });
+    }
+
+    // This test must go first or the LocalCacheManager singleton will be created by other tests
+    @Test(timeOut = 30_000, expectedExceptions = {AccessDeniedException.class}, priority = -1)
+    public void testCreationFailure()
+            throws Exception
+    {
+        File cacheDir = new File(cacheDirectory.getPath());
+        cacheDir.setWritable(false);
+        CacheConfig cacheConfig = new CacheConfig()
+                .setCacheType(ALLUXIO)
+                .setCachingEnabled(true)
+                .setBaseDirectory(cacheDirectory);
+        AlluxioCacheConfig alluxioCacheConfig = new AlluxioCacheConfig();
+        Configuration configuration = getHdfsConfiguration(cacheConfig, alluxioCacheConfig);
+        try {
+            cachingFileSystem(configuration);
+        }
+        finally {
+            cacheDir.setWritable(true);
+        }
+    }
+
+    @Test(timeOut = 30_000)
+    public void testInitialization()
+            throws Exception
+    {
+        int pageSize = (int) new DataSize(8, KILOBYTE).toBytes();
+        int maxCacheSize = (int) new DataSize(512, MEGABYTE).toBytes();
+        String jmxClass = "alluxio.metrics.sink.JmxSink";
+        String metricsDomain = "com.facebook.alluxio";
+
+        Configuration configuration = new Configuration();
+        configuration.set("alluxio.user.local.cache.enabled", "true");
+        configuration.set("alluxio.user.client.cache.dir", cacheDirectory.getPath());
+        configuration.set("alluxio.user.client.cache.page.size", Integer.toString(pageSize));
+        configuration.set("alluxio.user.client.cache.size", Integer.toString(maxCacheSize));
+        configuration.set("sink.jmx.class", jmxClass);
+        configuration.set("sink.jmx.domain", metricsDomain);
+
+        AlluxioCachingFileSystem fileSystem = cachingFileSystem(configuration);
+        Configuration conf = fileSystem.getConf();
+        assertTrue(conf.getBoolean("alluxio.user.local.cache.enabled", false));
+        assertEquals(cacheDirectory.getPath(), conf.get("alluxio.user.client.cache.dir", "bad result"));
+        assertEquals(pageSize, conf.getInt("alluxio.user.client.cache.page.size", 0));
+        assertEquals(maxCacheSize, conf.getInt("alluxio.user.client.cache.size", 0));
+        assertEquals(jmxClass, conf.get("sink.jmx.class", "bad result"));
+        assertEquals(metricsDomain, conf.get("sink.jmx.domain", "bad result"));
     }
 
     private void resetBaseline()
@@ -190,14 +252,13 @@ public class TestAlluxioCachingFileSystem
         assertEquals(MetricsSystem.meter(metricsKey.getName()).getCount() - baseline.getOrDefault(metricsKey.getName(), 0L), expected);
     }
 
-    private AlluxioCachingFileSystem cachingFileSystem(CacheConfig cacheConfig, AlluxioCacheConfig alluxioCacheConfig)
+    private AlluxioCachingFileSystem cachingFileSystem(Configuration configuration)
             throws URISyntaxException, IOException
     {
         Map<Path, byte[]> files = new HashMap<>();
         files.put(new Path(testFilePath), data);
-        Configuration configuration = getHdfsConfiguration(cacheConfig, alluxioCacheConfig);
         ExtendedFileSystem testingFileSystem = new TestingFileSystem(files, configuration);
-        URI uri = new URI("hdfs://test:8020/");
+        URI uri = new URI("alluxio://test:8020/");
         AlluxioCachingFileSystem cachingFileSystem = new AlluxioCachingFileSystem(testingFileSystem, uri);
         cachingFileSystem.initialize(uri, configuration);
         return cachingFileSystem;
@@ -222,7 +283,7 @@ public class TestAlluxioCachingFileSystem
     private int readFully(AlluxioCachingFileSystem fileSystem, long position, byte[] buffer, int offset, int length)
             throws Exception
     {
-        try (FSDataInputStream stream = fileSystem.openFile(new Path(testFilePath), new HiveFileContext(true, Optional.empty()))) {
+        try (FSDataInputStream stream = fileSystem.openFile(new Path(testFilePath), new HiveFileContext(true, NO_CACHE_CONSTRAINTS, Optional.empty()))) {
             return stream.read(position, buffer, offset, length);
         }
     }
@@ -317,89 +378,6 @@ public class TestAlluxioCachingFileSystem
             public ByteArrayDataInputStream(byte[] bytes)
             {
                 super(new ByteArraySeekableStream(bytes));
-            }
-        }
-
-        private static class ByteArraySeekableStream
-                extends InputStream
-                implements Seekable, PositionedReadable
-        {
-            private final ByteArrayInputStream inputStream;
-            private final int length;
-
-            public ByteArraySeekableStream(byte[] bytes)
-            {
-                inputStream = new ByteArrayInputStream(bytes);
-                length = bytes.length;
-            }
-
-            @Override
-            public int read()
-            {
-                return inputStream.read();
-            }
-
-            @Override
-            public int read(long position, byte[] buffer, int offset, int length)
-                    throws IOException
-            {
-                return read(buffer, 0, buffer.length);
-            }
-
-            @Override
-            public void readFully(long position, byte[] buffer, int offset, int length)
-                    throws IOException
-            {
-                int totalBytesRead = 0;
-                while (totalBytesRead < length) {
-                    int bytesRead = read(position + totalBytesRead, buffer, offset + totalBytesRead, length - totalBytesRead);
-                    if (bytesRead == -1) {
-                        throw new EOFException();
-                    }
-                    totalBytesRead += bytesRead;
-                }
-            }
-
-            @Override
-            public void readFully(long position, byte[] buffer)
-                    throws IOException
-            {
-                readFully(position, buffer, 0, buffer.length);
-            }
-
-            @Override
-            public void seek(long position)
-                    throws IOException
-            {
-                try {
-                    inputStream.reset();
-                    inputStream.skip(position);
-                }
-                catch (IllegalArgumentException e) {
-                    // convert back to IOException
-                    throw new IOException(e);
-                }
-            }
-
-            @Override
-            public long getPos()
-            {
-                return length - inputStream.available();
-            }
-
-            @Override
-            public boolean seekToNewSource(long targetPosition)
-                    throws IOException
-            {
-                throw new IOException(ExceptionMessage.NOT_SUPPORTED.getMessage());
-            }
-
-            @Override
-            public void close()
-                    throws IOException
-            {
-                inputStream.close();
-                super.close();
             }
         }
     }

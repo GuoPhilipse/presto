@@ -13,6 +13,10 @@
  */
 package com.facebook.presto.sql.gen;
 
+import com.facebook.presto.bytecode.BytecodeBlock;
+import com.facebook.presto.bytecode.ClassDefinition;
+import com.facebook.presto.bytecode.FieldDefinition;
+import com.facebook.presto.bytecode.Variable;
 import com.facebook.presto.spi.relation.CallExpression;
 import com.facebook.presto.spi.relation.ConstantExpression;
 import com.facebook.presto.spi.relation.InputReferenceExpression;
@@ -25,7 +29,9 @@ import com.facebook.presto.sql.planner.PlanVariableAllocator;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.Sets;
+import com.google.common.primitives.Primitives;
 
+import java.util.ArrayList;
 import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -34,6 +40,11 @@ import java.util.Map;
 import java.util.Set;
 import java.util.stream.Collectors;
 
+import static com.facebook.presto.bytecode.Access.PRIVATE;
+import static com.facebook.presto.bytecode.Access.a;
+import static com.facebook.presto.bytecode.expression.BytecodeExpressions.constantBoolean;
+import static com.facebook.presto.bytecode.expression.BytecodeExpressions.constantNull;
+import static com.facebook.presto.spi.relation.SpecialFormExpression.Form.BIND;
 import static com.facebook.presto.spi.relation.SpecialFormExpression.Form.WHEN;
 import static com.facebook.presto.sql.relational.Expressions.subExpressions;
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -85,7 +96,7 @@ public class CommonSubExpressionRewriter
         return collectCSEByLevel(ImmutableList.of(expression));
     }
 
-    public static Map<List<RowExpression>, Boolean> getExpressionsPartitionedByCSE(Collection<? extends RowExpression> expressions)
+    public static Map<List<RowExpression>, Boolean> getExpressionsPartitionedByCSE(Collection<? extends RowExpression> expressions, int expressionGroupSize)
     {
         if (expressions.isEmpty()) {
             return ImmutableMap.of();
@@ -128,13 +139,13 @@ public class CommonSubExpressionRewriter
                 break;
             }
             merged[i] = true;
-            ImmutableList.Builder<RowExpression> newList = ImmutableList.builder();
+            List<RowExpression> newList = new ArrayList<>();
             newList.add(expressionsWithCse.get(i));
             Set<RowExpression> dependencies = new HashSet<>();
             Set<RowExpression> first = cseDependency.get(i);
             dependencies.addAll(first);
             int j = i + 1;
-            while (j < merged.length) {
+            while (j < merged.length && newList.size() < expressionGroupSize) {
                 while (j < merged.length && merged[j]) {
                     j++;
                 }
@@ -147,12 +158,13 @@ public class CommonSubExpressionRewriter
                     newList.add(expression);
                     dependencies.addAll(second);
                     merged[j] = true;
+                    j = i + 1;
                 }
                 else {
                     j++;
                 }
             }
-            expressionsPartitionedByCse.put(newList.build(), true);
+            expressionsPartitionedByCse.put(ImmutableList.copyOf(newList), true);
         }
 
         return expressionsPartitionedByCse.build();
@@ -170,6 +182,9 @@ public class CommonSubExpressionRewriter
         int startCSELevel = cseByLevel.keySet().stream().reduce(Math::max).get();
         int stopCSELevel = cseByLevel.keySet().stream().reduce(Math::min).get();
         for (int i = startCSELevel; i > stopCSELevel; i--) {
+            if (!cseByLevel.containsKey(i)) {
+                continue;
+            }
             Map<RowExpression, Integer> expressions = cseByLevel.get(i).stream().filter(expression -> expressionCount.get(expression) > 0).collect(toImmutableMap(identity(), expressionCount::get));
             if (!expressions.isEmpty()) {
                 results.put(i, expressions);
@@ -377,12 +392,71 @@ public class CommonSubExpressionRewriter
         public Integer visitSpecialForm(SpecialFormExpression specialForm, Void collect)
         {
             int level = specialForm.getArguments().stream().map(argument -> argument.accept(this, null)).reduce(Math::max).get() + 1;
-            if (specialForm.getForm() != WHEN) {
+            if (specialForm.getForm() != WHEN && specialForm.getForm() != BIND) {
+                // BIND returns a function type rather than a value type
                 // WHEN is part of CASE expression. We do not have a separate code generator to generate code for WHEN expression separately so do not consider them as CSE
                 // TODO If we detect a whole WHEN statement as CSE we should probably only keep one
                 addAtLevel(level, specialForm);
             }
             return level;
+        }
+    }
+
+    static class CommonSubExpressionFields
+    {
+        private final FieldDefinition evaluatedField;
+        private final FieldDefinition resultField;
+        private final Class<?> resultType;
+        private final String methodName;
+
+        public CommonSubExpressionFields(FieldDefinition evaluatedField, FieldDefinition resultField, Class<?> resultType, String methodName)
+        {
+            this.evaluatedField = evaluatedField;
+            this.resultField = resultField;
+            this.resultType = resultType;
+            this.methodName = methodName;
+        }
+
+        public FieldDefinition getEvaluatedField()
+        {
+            return evaluatedField;
+        }
+
+        public FieldDefinition getResultField()
+        {
+            return resultField;
+        }
+
+        public String getMethodName()
+        {
+            return methodName;
+        }
+
+        public Class<?> getResultType()
+        {
+            return resultType;
+        }
+
+        public static Map<VariableReferenceExpression, CommonSubExpressionFields> declareCommonSubExpressionFields(ClassDefinition classDefinition, Map<Integer, Map<RowExpression, VariableReferenceExpression>> commonSubExpressionsByLevel)
+        {
+            ImmutableMap.Builder<VariableReferenceExpression, CommonSubExpressionFields> fields = ImmutableMap.builder();
+            commonSubExpressionsByLevel.values().stream().map(Map::values).flatMap(Collection::stream).forEach(variable -> {
+                Class<?> type = Primitives.wrap(variable.getType().getJavaType());
+                fields.put(variable, new CommonSubExpressionFields(
+                        classDefinition.declareField(a(PRIVATE), variable.getName() + "Evaluated", boolean.class),
+                        classDefinition.declareField(a(PRIVATE), variable.getName() + "Result", type),
+                        type,
+                        "get" + variable.getName()));
+            });
+            return fields.build();
+        }
+
+        public static void initializeCommonSubExpressionFields(Collection<CommonSubExpressionFields> cseFields, Variable thisVariable, BytecodeBlock body)
+        {
+            cseFields.forEach(fields -> {
+                body.append(thisVariable.setField(fields.getEvaluatedField(), constantBoolean(false)));
+                body.append(thisVariable.setField(fields.getResultField(), constantNull(fields.getResultType())));
+            });
         }
     }
 }

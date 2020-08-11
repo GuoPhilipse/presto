@@ -46,6 +46,7 @@ import org.apache.hadoop.mapred.JobConf;
 import org.apache.hadoop.mapred.TextInputFormat;
 import org.apache.hudi.hadoop.HoodieParquetInputFormat;
 import org.apache.hudi.hadoop.HoodieROTablePathFilter;
+import org.apache.hudi.hadoop.realtime.HoodieParquetRealtimeInputFormat;
 
 import java.io.BufferedReader;
 import java.io.IOException;
@@ -73,6 +74,7 @@ import static com.facebook.presto.hive.HiveErrorCode.HIVE_INVALID_BUCKET_FILES;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_INVALID_METADATA;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_INVALID_PARTITION_VALUE;
 import static com.facebook.presto.hive.HiveErrorCode.HIVE_UNKNOWN_ERROR;
+import static com.facebook.presto.hive.HiveSessionProperties.getMaxInitialSplitSize;
 import static com.facebook.presto.hive.HiveSessionProperties.getNodeSelectionStrategy;
 import static com.facebook.presto.hive.HiveSessionProperties.isUseListDirectoryCache;
 import static com.facebook.presto.hive.HiveUtil.getFooterCount;
@@ -322,9 +324,11 @@ public class BackgroundHiveSplitLoader
                         inputFormat,
                         pathDomain,
                         getNodeSelectionStrategy(session),
+                        getMaxInitialSplitSize(session),
                         s3SelectPushdownEnabled,
                         new HiveSplitPartitionInfo(storage, path.toUri(), partitionKeys, partitionName, partitionDataColumnCount, partition.getPartitionSchemaDifference(), Optional.empty()),
-                        schedulerUsesHostAddresses);
+                        schedulerUsesHostAddresses,
+                        partition.getEncryptionInformation());
                 lastResult = addSplitsToSource(targetSplits, splitFactory);
                 if (stopped) {
                     return COMPLETED_FUTURE;
@@ -355,6 +359,7 @@ public class BackgroundHiveSplitLoader
                 inputFormat,
                 pathDomain,
                 getNodeSelectionStrategy(session),
+                getMaxInitialSplitSize(session),
                 s3SelectPushdownEnabled,
                 new HiveSplitPartitionInfo(
                         storage,
@@ -364,9 +369,10 @@ public class BackgroundHiveSplitLoader
                         partitionDataColumnCount,
                         partition.getPartitionSchemaDifference(),
                         bucketConversionRequiresWorkerParticipation ? bucketConversion : Optional.empty()),
-                schedulerUsesHostAddresses);
+                schedulerUsesHostAddresses,
+                partition.getEncryptionInformation());
 
-        if (!isHudiInputFormat(inputFormat) && shouldUseFileSplitsFromInputFormat(inputFormat)) {
+        if (!isHudiParquetInputFormat(inputFormat) && shouldUseFileSplitsFromInputFormat(inputFormat)) {
             if (tableBucketInfo.isPresent()) {
                 throw new PrestoException(NOT_SUPPORTED, "Presto cannot read bucketed partition in an input format with UseFileSplitsFromInputFormat annotation: " + inputFormat.getClass().getSimpleName());
             }
@@ -376,11 +382,12 @@ public class BackgroundHiveSplitLoader
 
             return addSplitsToSource(splits, splitFactory);
         }
-        PathFilter pathFilter = isHudiInputFormat(inputFormat) ? hoodiePathFilterSupplier.get() : path1 -> true;
+        PathFilter pathFilter = isHudiParquetInputFormat(inputFormat) ? hoodiePathFilterSupplier.get() : path1 -> true;
         // S3 Select pushdown works at the granularity of individual S3 objects,
         // therefore we must not split files when it is enabled.
         Properties schema = getHiveSchema(storage.getSerdeParameters(), table.getParameters());
-        boolean splittable = getHeaderCount(schema) == 0 && getFooterCount(schema) == 0 && !s3SelectPushdownEnabled;
+        // Skip header / footer lines are not splittable except for a special case when skip.header.line.count=1
+        boolean splittable = !s3SelectPushdownEnabled && getFooterCount(schema) == 0 && getHeaderCount(schema) <= 1;
 
         // Bucketed partitions are fully loaded immediately since all files must be loaded to determine the file to bucket mapping
         if (tableBucketInfo.isPresent()) {
@@ -415,8 +422,11 @@ public class BackgroundHiveSplitLoader
         return lastResult;
     }
 
-    private static boolean isHudiInputFormat(InputFormat<?, ?> inputFormat)
+    private static boolean isHudiParquetInputFormat(InputFormat<?, ?> inputFormat)
     {
+        if (inputFormat instanceof HoodieParquetRealtimeInputFormat) {
+            return false;
+        }
         return inputFormat instanceof HoodieParquetInputFormat;
     }
 

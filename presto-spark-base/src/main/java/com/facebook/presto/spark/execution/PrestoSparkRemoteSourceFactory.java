@@ -16,65 +16,69 @@ package com.facebook.presto.spark.execution;
 import com.facebook.presto.Session;
 import com.facebook.presto.common.block.SortOrder;
 import com.facebook.presto.common.type.Type;
-import com.facebook.presto.operator.OperatorFactory;
-import com.facebook.presto.spark.classloader_interface.PrestoSparkRow;
+import com.facebook.presto.operator.SourceOperatorFactory;
 import com.facebook.presto.spark.classloader_interface.PrestoSparkSerializedPage;
+import com.facebook.presto.spark.classloader_interface.PrestoSparkShuffleStats;
 import com.facebook.presto.spark.execution.PrestoSparkRemoteSourceOperator.SparkRemoteSourceOperatorFactory;
 import com.facebook.presto.spi.page.PagesSerde;
 import com.facebook.presto.spi.plan.PlanNodeId;
 import com.facebook.presto.sql.planner.RemoteSourceFactory;
 import com.google.common.collect.ImmutableMap;
+import org.apache.spark.util.CollectionAccumulator;
 
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 
-import static com.facebook.presto.spark.util.PrestoSparkUtils.toSerializedPage;
-import static com.facebook.presto.spark.util.PrestoSparkUtils.transformRowsToPages;
 import static com.google.common.base.Preconditions.checkArgument;
-import static com.google.common.collect.Iterators.transform;
 import static java.util.Objects.requireNonNull;
 
 public class PrestoSparkRemoteSourceFactory
         implements RemoteSourceFactory
 {
     private final PagesSerde pagesSerde;
-    private final Map<PlanNodeId, Iterator<PrestoSparkRow>> shuffleInputs;
-    private final Map<PlanNodeId, Iterator<PrestoSparkSerializedPage>> broadcastInputs;
+    private final Map<PlanNodeId, List<PrestoSparkShuffleInput>> shuffleInputsMap;
+    private final Map<PlanNodeId, List<java.util.Iterator<PrestoSparkSerializedPage>>> pageInputsMap;
+    private final int taskId;
+    private final CollectionAccumulator<PrestoSparkShuffleStats> shuffleStatsCollector;
 
     public PrestoSparkRemoteSourceFactory(
             PagesSerde pagesSerde,
-            Map<PlanNodeId, Iterator<PrestoSparkRow>> shuffleInputs,
-            Map<PlanNodeId, Iterator<PrestoSparkSerializedPage>> broadcastInputs)
+            Map<PlanNodeId, List<PrestoSparkShuffleInput>> shuffleInputsMap,
+            Map<PlanNodeId, List<Iterator<PrestoSparkSerializedPage>>> pageInputsMap,
+            int taskId,
+            CollectionAccumulator<PrestoSparkShuffleStats> shuffleStatsCollector)
     {
         this.pagesSerde = requireNonNull(pagesSerde, "pagesSerde is null");
-        this.shuffleInputs = ImmutableMap.copyOf(requireNonNull(shuffleInputs, "shuffleInputs is null"));
-        this.broadcastInputs = ImmutableMap.copyOf(requireNonNull(broadcastInputs, "broadcastInputs is null"));
+        this.shuffleInputsMap = ImmutableMap.copyOf(requireNonNull(shuffleInputsMap, "shuffleInputsMap is null"));
+        this.pageInputsMap = ImmutableMap.copyOf(requireNonNull(pageInputsMap, "pageInputs is null"));
+        this.taskId = taskId;
+        this.shuffleStatsCollector = requireNonNull(shuffleStatsCollector, "shuffleStatsCollector is null");
     }
 
     @Override
-    public OperatorFactory createRemoteSource(Session session, int operatorId, PlanNodeId planNodeId, List<Type> types)
+    public SourceOperatorFactory createRemoteSource(Session session, int operatorId, PlanNodeId planNodeId, List<Type> types)
     {
-        Iterator<PrestoSparkRow> shuffleInput = shuffleInputs.get(planNodeId);
-        Iterator<PrestoSparkSerializedPage> broadcastInput = broadcastInputs.get(planNodeId);
-        checkArgument(shuffleInput != null || broadcastInput != null, "input not found for plan node with id %s", planNodeId);
-        checkArgument(shuffleInput == null || broadcastInput == null, "single remote source cannot accept both, broadcast and shuffle inputs");
+        List<PrestoSparkShuffleInput> shuffleInputs = shuffleInputsMap.get(planNodeId);
+        List<java.util.Iterator<PrestoSparkSerializedPage>> pageInputs = pageInputsMap.get(planNodeId);
+        checkArgument(shuffleInputs != null || pageInputs != null, "input not found for plan node with id %s", planNodeId);
+        checkArgument(shuffleInputs == null || pageInputs == null, "single remote source cannot accept both, shuffle and page inputs");
 
-        if (broadcastInput != null) {
+        if (pageInputs != null) {
             return new SparkRemoteSourceOperatorFactory(
                     operatorId,
                     planNodeId,
-                    transform(broadcastInput, sparkSerializedPage -> pagesSerde.deserialize(toSerializedPage(sparkSerializedPage))));
+                    new PrestoSparkSerializedPageInput(pagesSerde, pageInputs));
         }
 
         return new SparkRemoteSourceOperatorFactory(
                 operatorId,
                 planNodeId,
-                transformRowsToPages(shuffleInput, types));
+                new PrestoSparkShufflePageInput(types, shuffleInputs, taskId, shuffleStatsCollector));
     }
 
     @Override
-    public OperatorFactory createMergeRemoteSource(
+    public SourceOperatorFactory createMergeRemoteSource(
             Session session,
             int operatorId,
             PlanNodeId planNodeId,

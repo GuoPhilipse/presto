@@ -68,9 +68,10 @@ public class FeaturesConfig
     private JoinDistributionType joinDistributionType = PARTITIONED;
     private DataSize joinMaxBroadcastTableSize;
     private boolean colocatedJoinsEnabled = true;
-    private boolean groupedExecutionForAggregationEnabled;
-    private boolean groupedExecutionForEligibleTableScansEnabled;
-    private boolean dynamicScheduleForGroupedExecution;
+    private boolean groupedExecutionForAggregationEnabled = true;
+    private boolean groupedExecutionForJoinEnabled = true;
+    private boolean groupedExecutionEnabled = true;
+    private boolean dynamicScheduleForGroupedExecution = true;
     private boolean recoverableGroupedExecutionEnabled;
     private double maxFailedTaskPercentage = 0.3;
     private int maxStageRetries;
@@ -96,6 +97,7 @@ public class FeaturesConfig
     private boolean legacyMapSubscript;
     private boolean legacyRowFieldOrdinalAccess;
     private boolean legacyCharToVarcharCoercion;
+    private boolean legacyDateTimestampToVarcharCoercion;
     private boolean optimizeMixedDistinctAggregations;
     private boolean forceSingleNodeOutput = true;
     private boolean pagesIndexEagerCompactionEnabled;
@@ -115,7 +117,9 @@ public class FeaturesConfig
     private int spillerThreads = 4;
     private double spillMaxUsedSpaceThreshold = 0.9;
     private boolean iterativeOptimizerEnabled = true;
+    private boolean runtimeOptimizerEnabled;
     private boolean enableStatsCalculator = true;
+    private boolean enableStatsCollectionForTemporaryTable;
     private boolean ignoreStatsCalculatorFailures = true;
     private boolean printStatsForNonJoinQuery;
     private boolean defaultFilterFactorEnabled;
@@ -130,6 +134,9 @@ public class FeaturesConfig
     private boolean optimizeFullOuterJoinWithCoalesce = true;
 
     private Duration iterativeOptimizerTimeout = new Duration(3, MINUTES); // by default let optimizer wait a long time in case it retrieves some data from ConnectorMetadata
+    private boolean enableDynamicFiltering;
+    private int dynamicFilteringMaxPerDriverRowCount = 100;
+    private DataSize dynamicFilteringMaxPerDriverSize = new DataSize(10, KILOBYTE);
 
     private DataSize filterAndProjectMinOutputPageSize = new DataSize(500, KILOBYTE);
     private int filterAndProjectMinOutputPageRowCount = 256;
@@ -152,6 +159,10 @@ public class FeaturesConfig
     private boolean useLegacyScheduler = true;
     private boolean optimizeCommonSubExpressions = true;
     private boolean preferDistributedUnion = true;
+    private boolean optimizeNullsInJoin;
+    private boolean pushdownDereferenceEnabled;
+
+    private String warnOnNoTableLayoutFilter = "";
 
     private PartitioningPrecisionStrategy partitioningPrecisionStrategy = PartitioningPrecisionStrategy.AUTOMATIC;
 
@@ -282,6 +293,18 @@ public class FeaturesConfig
         return legacyCharToVarcharCoercion;
     }
 
+    @Config("deprecated.legacy-date-timestamp-to-varchar-coercion")
+    public FeaturesConfig setLegacyDateTimestampToVarcharCoercion(boolean legacyDateTimestampToVarcharCoercion)
+    {
+        this.legacyDateTimestampToVarcharCoercion = legacyDateTimestampToVarcharCoercion;
+        return this;
+    }
+
+    public boolean isLegacyDateTimestampToVarcharCoercion()
+    {
+        return legacyDateTimestampToVarcharCoercion;
+    }
+
     @Config("deprecated.legacy-array-agg")
     public FeaturesConfig setLegacyArrayAgg(boolean legacyArrayAgg)
     {
@@ -372,23 +395,36 @@ public class FeaturesConfig
     }
 
     @Config("grouped-execution-for-aggregation-enabled")
-    @ConfigDescription("Experimental: Use grouped execution for aggregation when possible")
+    @ConfigDescription("Use grouped execution for aggregation when possible")
     public FeaturesConfig setGroupedExecutionForAggregationEnabled(boolean groupedExecutionForAggregationEnabled)
     {
         this.groupedExecutionForAggregationEnabled = groupedExecutionForAggregationEnabled;
         return this;
     }
 
-    public boolean isGroupedExecutionForEligibleTableScansEnabled()
+    public boolean isGroupedExecutionForJoinEnabled()
     {
-        return groupedExecutionForEligibleTableScansEnabled;
+        return groupedExecutionForJoinEnabled;
     }
 
-    @Config("experimental.grouped-execution-for-eligible-table-scans-enabled")
-    @ConfigDescription("Experimental: Use grouped execution for eligible table scans")
-    public FeaturesConfig setGroupedExecutionForEligibleTableScansEnabled(boolean groupedExecutionForEligibleTableScansEnabled)
+    @Config("grouped-execution-for-join-enabled")
+    @ConfigDescription("Use grouped execution for join when possible")
+    public FeaturesConfig setGroupedExecutionForJoinEnabled(boolean groupedExecutionForJoinEnabled)
     {
-        this.groupedExecutionForEligibleTableScansEnabled = groupedExecutionForEligibleTableScansEnabled;
+        this.groupedExecutionForJoinEnabled = groupedExecutionForJoinEnabled;
+        return this;
+    }
+
+    public boolean isGroupedExecutionEnabled()
+    {
+        return groupedExecutionEnabled;
+    }
+
+    @Config("grouped-execution-enabled")
+    @ConfigDescription("Use grouped execution when possible")
+    public FeaturesConfig setGroupedExecutionEnabled(boolean groupedExecutionEnabled)
+    {
+        this.groupedExecutionEnabled = groupedExecutionEnabled;
         return this;
     }
 
@@ -605,6 +641,7 @@ public class FeaturesConfig
     }
 
     @Config("optimizer.optimize-metadata-queries")
+    @ConfigDescription("Enable optimization for metadata queries. Note if metadata entry has empty data, the result might be different (e.g. empty Hive partition)")
     public FeaturesConfig setOptimizeMetadataQueries(boolean optimizeMetadataQueries)
     {
         this.optimizeMetadataQueries = optimizeMetadataQueries;
@@ -745,6 +782,18 @@ public class FeaturesConfig
         return this;
     }
 
+    public boolean isRuntimeOptimizerEnabled()
+    {
+        return runtimeOptimizerEnabled;
+    }
+
+    @Config("experimental.runtime-optimizer-enabled")
+    public FeaturesConfig setRuntimeOptimizerEnabled(boolean value)
+    {
+        this.runtimeOptimizerEnabled = value;
+        return this;
+    }
+
     public Duration getIterativeOptimizerTimeout()
     {
         return iterativeOptimizerTimeout;
@@ -762,10 +811,22 @@ public class FeaturesConfig
         return enableStatsCalculator;
     }
 
+    public boolean isEnableStatsCollectionForTemporaryTable()
+    {
+        return enableStatsCollectionForTemporaryTable;
+    }
+
     @Config("experimental.enable-stats-calculator")
     public FeaturesConfig setEnableStatsCalculator(boolean enableStatsCalculator)
     {
         this.enableStatsCalculator = enableStatsCalculator;
+        return this;
+    }
+
+    @Config("experimental.enable-stats-collection-for-temporary-table")
+    public FeaturesConfig setEnableStatsCollectionForTemporaryTable(boolean enableStatsCollectionForTemporaryTable)
+    {
+        this.enableStatsCollectionForTemporaryTable = enableStatsCollectionForTemporaryTable;
         return this;
     }
 
@@ -889,6 +950,43 @@ public class FeaturesConfig
     public FeaturesConfig setSpillMaxUsedSpaceThreshold(double spillMaxUsedSpaceThreshold)
     {
         this.spillMaxUsedSpaceThreshold = spillMaxUsedSpaceThreshold;
+        return this;
+    }
+
+    public boolean isEnableDynamicFiltering()
+    {
+        return enableDynamicFiltering;
+    }
+
+    @Config("experimental.enable-dynamic-filtering")
+    public FeaturesConfig setEnableDynamicFiltering(boolean value)
+    {
+        this.enableDynamicFiltering = value;
+        return this;
+    }
+
+    public int getDynamicFilteringMaxPerDriverRowCount()
+    {
+        return dynamicFilteringMaxPerDriverRowCount;
+    }
+
+    @Config("experimental.dynamic-filtering-max-per-driver-row-count")
+    public FeaturesConfig setDynamicFilteringMaxPerDriverRowCount(int dynamicFilteringMaxPerDriverRowCount)
+    {
+        this.dynamicFilteringMaxPerDriverRowCount = dynamicFilteringMaxPerDriverRowCount;
+        return this;
+    }
+
+    @MaxDataSize("1MB")
+    public DataSize getDynamicFilteringMaxPerDriverSize()
+    {
+        return dynamicFilteringMaxPerDriverSize;
+    }
+
+    @Config("experimental.dynamic-filtering-max-per-driver-size")
+    public FeaturesConfig setDynamicFilteringMaxPerDriverSize(DataSize dynamicFilteringMaxPerDriverSize)
+    {
+        this.dynamicFilteringMaxPerDriverSize = dynamicFilteringMaxPerDriverSize;
         return this;
     }
 
@@ -1126,6 +1224,19 @@ public class FeaturesConfig
         return pushdownSubfieldsEnabled;
     }
 
+    @Config("experimental.pushdown-dereference-enabled")
+    @ConfigDescription("Experimental: enable dereference pushdown")
+    public FeaturesConfig setPushdownDereferenceEnabled(boolean pushdownDereferenceEnabled)
+    {
+        this.pushdownDereferenceEnabled = pushdownDereferenceEnabled;
+        return this;
+    }
+
+    public boolean isPushdownDereferenceEnabled()
+    {
+        return pushdownDereferenceEnabled;
+    }
+
     public boolean isTableWriterMergeOperatorEnabled()
     {
         return tableWriterMergeOperatorEnabled;
@@ -1248,6 +1359,30 @@ public class FeaturesConfig
     public FeaturesConfig setPreferDistributedUnion(boolean preferDistributedUnion)
     {
         this.preferDistributedUnion = preferDistributedUnion;
+        return this;
+    }
+
+    public boolean isOptimizeNullsInJoin()
+    {
+        return optimizeNullsInJoin;
+    }
+
+    @Config("optimize-nulls-in-join")
+    public FeaturesConfig setOptimizeNullsInJoin(boolean optimizeNullsInJoin)
+    {
+        this.optimizeNullsInJoin = optimizeNullsInJoin;
+        return this;
+    }
+
+    public String getWarnOnNoTableLayoutFilter()
+    {
+        return warnOnNoTableLayoutFilter;
+    }
+
+    @Config("warn-on-no-table-layout-filter")
+    public FeaturesConfig setWarnOnNoTableLayoutFilter(String warnOnNoTableLayoutFilter)
+    {
+        this.warnOnNoTableLayoutFilter = warnOnNoTableLayoutFilter;
         return this;
     }
 }

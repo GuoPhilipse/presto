@@ -39,12 +39,13 @@ import com.facebook.presto.spi.function.ScalarFunction;
 import com.facebook.presto.spi.function.SqlNullable;
 import com.facebook.presto.spi.function.SqlType;
 import com.google.common.base.Joiner;
-import com.google.common.base.VerifyException;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableSet;
+import com.google.common.collect.Streams;
 import io.airlift.slice.BasicSliceInput;
 import io.airlift.slice.Slice;
+import io.airlift.slice.Slices;
 import org.locationtech.jts.geom.Coordinate;
 import org.locationtech.jts.geom.CoordinateSequence;
 import org.locationtech.jts.geom.Geometry;
@@ -63,6 +64,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.NoSuchElementException;
 import java.util.Objects;
+import java.util.Optional;
 import java.util.Set;
 
 import static com.esri.core.geometry.NonSimpleResult.Reason.Clustering;
@@ -95,6 +97,8 @@ import static com.facebook.presto.geospatial.GeometryUtils.createJtsPoint;
 import static com.facebook.presto.geospatial.GeometryUtils.flattenCollection;
 import static com.facebook.presto.geospatial.GeometryUtils.getGeometryInvalidReason;
 import static com.facebook.presto.geospatial.GeometryUtils.getPointCount;
+import static com.facebook.presto.geospatial.GeometryUtils.jsonFromJtsGeometry;
+import static com.facebook.presto.geospatial.GeometryUtils.jtsGeometryFromJson;
 import static com.facebook.presto.geospatial.GeometryUtils.jtsGeometryFromWkt;
 import static com.facebook.presto.geospatial.GeometryUtils.wktFromJtsGeometry;
 import static com.facebook.presto.geospatial.serde.EsriGeometrySerde.deserializeEnvelope;
@@ -105,6 +109,7 @@ import static com.facebook.presto.plugin.geospatial.GeometryType.GEOMETRY;
 import static com.facebook.presto.plugin.geospatial.GeometryType.GEOMETRY_TYPE_NAME;
 import static com.facebook.presto.spi.StandardErrorCode.INVALID_FUNCTION_ARGUMENT;
 import static com.google.common.base.Preconditions.checkArgument;
+import static com.google.common.collect.ImmutableList.toImmutableList;
 import static io.airlift.slice.Slices.utf8Slice;
 import static io.airlift.slice.Slices.wrappedBuffer;
 import static java.lang.Double.isInfinite;
@@ -412,7 +417,7 @@ public final class GeoFunctions
     {
         try {
             Geometry geometry = deserialize(input);
-            return utf8Slice(getGeometryInvalidReason(geometry));
+            return getGeometryInvalidReason(geometry).map(Slices::utf8Slice).orElse(null);
         }
         catch (PrestoException e) {
             if (e.getCause() instanceof TopologyException) {
@@ -1151,6 +1156,21 @@ public final class GeoFunctions
         return EsriGeometrySerde.getGeometryType(input).standardName();
     }
 
+    @Description("Recursively flattens GeometryCollections")
+    @ScalarFunction("flatten_geometry_collections")
+    @SqlType("array(" + GEOMETRY_TYPE_NAME + ")")
+    public static Block flattenGeometryCollections(@SqlType(GEOMETRY_TYPE_NAME) Slice input)
+    {
+        OGCGeometry geometry = EsriGeometrySerde.deserialize(input);
+        List<OGCGeometry> components = Streams.stream(
+                flattenCollection(geometry)).collect(toImmutableList());
+        BlockBuilder blockBuilder = GEOMETRY.createBlockBuilder(null, components.size());
+        for (OGCGeometry component : components) {
+            GEOMETRY.writeSlice(blockBuilder, EsriGeometrySerde.serialize(component));
+        }
+        return blockBuilder.build();
+    }
+
     @ScalarFunction
     @SqlNullable
     @Description("Returns an array of spatial partition IDs for a given geometry")
@@ -1193,28 +1213,35 @@ public final class GeoFunctions
         return spatialPartitions((KdbTree) kdbTree, expandedEnvelope2D);
     }
 
+    @ScalarFunction("geometry_from_geojson")
+    @Description("Returns a geometry from a geo JSON string")
+    @SqlType(GEOMETRY_TYPE_NAME)
+    public static Slice geometryFromGeoJson(@SqlType(VARCHAR) Slice input)
+    {
+        return serialize(jtsGeometryFromJson(input.toStringUtf8()));
+    }
+
+    @SqlNullable
+    @ScalarFunction("geometry_as_geojson")
+    @Description("Returns geo JSON string based on the input geometry")
+    @SqlType(VARCHAR)
+    public static Slice geometryAsGeoJson(@SqlType(GEOMETRY_TYPE_NAME) Slice input)
+    {
+        Optional<String> geoJson = jsonFromJtsGeometry(deserialize(input));
+        if (geoJson.isPresent()) {
+            return utf8Slice(geoJson.get());
+        }
+        else {
+            return null;
+        }
+    }
+
     // Package visible for SphericalGeoFunctions
     /*package*/ static Block spatialPartitions(KdbTree kdbTree, Rectangle envelope)
     {
         Map<Integer, Rectangle> partitions = kdbTree.findIntersectingLeaves(envelope);
         if (partitions.isEmpty()) {
             return EMPTY_ARRAY_OF_INTS;
-        }
-
-        // For input rectangles that represent a single point, return at most one partition
-        // by excluding right and upper sides of partition rectangles. The logic that builds
-        // KDB tree needs to make sure to add some padding to the right and upper sides of the
-        // overall extent of the tree to avoid missing right-most and top-most points.
-        boolean point = (envelope.getWidth() == 0 && envelope.getHeight() == 0);
-        if (point) {
-            for (Map.Entry<Integer, Rectangle> partition : partitions.entrySet()) {
-                if (envelope.getXMin() < partition.getValue().getXMax() && envelope.getYMin() < partition.getValue().getYMax()) {
-                    BlockBuilder blockBuilder = IntegerType.INTEGER.createFixedSizeBlockBuilder(1);
-                    blockBuilder.writeInt(partition.getKey());
-                    return blockBuilder.build();
-                }
-            }
-            throw new VerifyException(format("Cannot find half-open partition extent for a point: (%s, %s)", envelope.getXMin(), envelope.getYMin()));
         }
 
         BlockBuilder blockBuilder = IntegerType.INTEGER.createFixedSizeBlockBuilder(partitions.size());

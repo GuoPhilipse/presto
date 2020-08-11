@@ -24,12 +24,12 @@ import com.facebook.presto.verifier.framework.QueryException;
 import com.facebook.presto.verifier.framework.QueryResult;
 import com.facebook.presto.verifier.framework.QueryStage;
 import com.facebook.presto.verifier.framework.VerificationContext;
+import com.facebook.presto.verifier.framework.VerifierConfig;
 import com.facebook.presto.verifier.retry.ForClusterConnection;
 import com.facebook.presto.verifier.retry.ForPresto;
 import com.facebook.presto.verifier.retry.RetryConfig;
 import com.facebook.presto.verifier.retry.RetryDriver;
 import com.google.common.collect.ImmutableList;
-import com.google.common.collect.ImmutableMap;
 import io.airlift.units.Duration;
 
 import java.sql.DriverManager;
@@ -42,21 +42,24 @@ import java.util.Optional;
 import java.util.function.Consumer;
 
 import static com.facebook.presto.sql.SqlFormatter.formatSql;
-import static com.google.common.base.Preconditions.checkState;
+import static com.facebook.presto.verifier.prestoaction.QueryActionUtil.mangleSessionProperties;
 import static java.util.Objects.requireNonNull;
 
 public class JdbcPrestoAction
         implements PrestoAction
 {
-    private static final String QUERY_MAX_EXECUTION_TIME = "query_max_execution_time";
+    public static final String QUERY_ACTION_TYPE = "presto-jdbc";
 
     private final SqlExceptionClassifier exceptionClassifier;
     private final QueryConfiguration queryConfiguration;
+    private final VerificationContext verificationContext;
 
     private final String jdbcUrl;
     private final Duration queryTimeout;
     private final Duration metadataTimeout;
     private final Duration checksumTimeout;
+    private final String testId;
+    private final Optional<String> testName;
 
     private final RetryDriver<QueryException> networkRetry;
     private final RetryDriver<QueryException> prestoRetry;
@@ -65,17 +68,23 @@ public class JdbcPrestoAction
             SqlExceptionClassifier exceptionClassifier,
             QueryConfiguration queryConfiguration,
             VerificationContext verificationContext,
-            PrestoClusterConfig prestoClusterConfig,
+            PrestoActionConfig prestoActionConfig,
+            Duration metadataTimeout,
+            Duration checksumTimeout,
             @ForClusterConnection RetryConfig networkRetryConfig,
-            @ForPresto RetryConfig prestoRetryConfig)
+            @ForPresto RetryConfig prestoRetryConfig,
+            VerifierConfig verifierConfig)
     {
         this.exceptionClassifier = requireNonNull(exceptionClassifier, "exceptionClassifier is null");
         this.queryConfiguration = requireNonNull(queryConfiguration, "queryConfiguration is null");
+        this.verificationContext = requireNonNull(verificationContext, "verificationContext is null");
 
-        this.jdbcUrl = requireNonNull(prestoClusterConfig.getJdbcUrl(), "jdbcUrl is null");
-        this.queryTimeout = requireNonNull(prestoClusterConfig.getQueryTimeout(), "queryTimeout is null");
-        this.metadataTimeout = requireNonNull(prestoClusterConfig.getMetadataTimeout(), "metadataTimeout is null");
-        this.checksumTimeout = requireNonNull(prestoClusterConfig.getChecksumTimeout(), "checksumTimeout is null");
+        this.jdbcUrl = requireNonNull(prestoActionConfig.getJdbcUrl(), "jdbcUrl is null");
+        this.queryTimeout = requireNonNull(prestoActionConfig.getQueryTimeout(), "queryTimeout is null");
+        this.metadataTimeout = requireNonNull(metadataTimeout, "metadataTimeout is null");
+        this.checksumTimeout = requireNonNull(checksumTimeout, "checksumTimeout is null");
+        this.testId = requireNonNull(verifierConfig.getTestId(), "testId is null");
+        this.testName = requireNonNull(verifierConfig.getTestName(), "testName is null");
 
         this.networkRetry = new RetryDriver<>(
                 networkRetryConfig,
@@ -90,7 +99,7 @@ public class JdbcPrestoAction
     }
 
     @Override
-    public QueryStats execute(Statement statement, QueryStage queryStage)
+    public QueryActionStats execute(Statement statement, QueryStage queryStage)
     {
         return execute(statement, queryStage, new NoResultStatementExecutor<>());
     }
@@ -113,8 +122,13 @@ public class JdbcPrestoAction
     private <T> T executeOnce(Statement statement, QueryStage queryStage, StatementExecutor<T> statementExecutor)
     {
         String query = formatSql(statement, Optional.empty());
+        String clientInfo = new ClientInfo(
+                testId,
+                testName,
+                verificationContext.getSourceQueryName(),
+                verificationContext.getSuite()).serialize();
 
-        try (PrestoConnection connection = getConnection(queryStage)) {
+        try (PrestoConnection connection = getConnection(queryStage, clientInfo)) {
             try (java.sql.Statement jdbcStatement = connection.createStatement()) {
                 PrestoStatement prestoStatement = jdbcStatement.unwrap(PrestoStatement.class);
                 prestoStatement.setProgressMonitor(statementExecutor.getProgressMonitor());
@@ -126,7 +140,7 @@ public class JdbcPrestoAction
         }
     }
 
-    private PrestoConnection getConnection(QueryStage queryStage)
+    private PrestoConnection getConnection(QueryStage queryStage, String clientInfo)
             throws SQLException
     {
         PrestoConnection connection = DriverManager.getConnection(
@@ -137,6 +151,7 @@ public class JdbcPrestoAction
 
         try {
             connection.setClientInfo("ApplicationName", "verifier-test");
+            connection.setClientInfo("ClientInfo", clientInfo);
             connection.setCatalog(queryConfiguration.getCatalog());
             connection.setSchema(queryConfiguration.getSchema());
         }
@@ -144,10 +159,7 @@ public class JdbcPrestoAction
             // Do nothing
         }
 
-        Map<String, String> sessionProperties = ImmutableMap.<String, String>builder()
-                .putAll(queryConfiguration.getSessionProperties())
-                .put(QUERY_MAX_EXECUTION_TIME, getTimeout(queryStage).toString())
-                .build();
+        Map<String, String> sessionProperties = mangleSessionProperties(queryConfiguration.getSessionProperties(), queryStage, getTimeout(queryStage));
         for (Entry<String, String> entry : sessionProperties.entrySet()) {
             connection.setSessionProperty(entry.getKey(), entry.getValue());
         }
@@ -159,6 +171,11 @@ public class JdbcPrestoAction
         switch (queryStage) {
             case REWRITE:
             case DESCRIBE:
+            case CONTROL_SETUP:
+            case CONTROL_TEARDOWN:
+            case TEST_SETUP:
+            case TEST_TEARDOWN:
+            case DETERMINISM_ANALYSIS_SETUP:
                 return metadataTimeout;
             case CONTROL_CHECKSUM:
             case TEST_CHECKSUM:
@@ -180,9 +197,9 @@ public class JdbcPrestoAction
             this.queryStats = Optional.of(requireNonNull(queryStats, "queryStats is null"));
         }
 
-        public synchronized Optional<QueryStats> getLastQueryStats()
+        public synchronized QueryActionStats getLastQueryStats()
         {
-            return queryStats;
+            return new QueryActionStats(queryStats, Optional.empty());
         }
     }
 
@@ -214,8 +231,7 @@ public class JdbcPrestoAction
                 while (resultSet.next()) {
                     converter.apply(resultSet).ifPresent(rows::add);
                 }
-                checkState(progressMonitor.getLastQueryStats().isPresent(), "lastQueryStats is missing");
-                return new QueryResult<>(rows.build(), resultSet.getMetaData(), progressMonitor.getLastQueryStats().get());
+                return new QueryResult<>(rows.build(), resultSet.getMetaData(), progressMonitor.getLastQueryStats());
             }
         }
 
@@ -227,12 +243,12 @@ public class JdbcPrestoAction
     }
 
     private static class NoResultStatementExecutor<R>
-            implements StatementExecutor<QueryStats>
+            implements StatementExecutor<QueryActionStats>
     {
         private final ProgressMonitor progressMonitor = new ProgressMonitor();
 
         @Override
-        public QueryStats execute(PrestoStatement statement, String query)
+        public QueryActionStats execute(PrestoStatement statement, String query)
                 throws SQLException
         {
             boolean moreResults = statement.execute(query);
@@ -246,8 +262,7 @@ public class JdbcPrestoAction
                 }
             }
             while (moreResults || statement.getUpdateCount() != -1);
-            checkState(progressMonitor.getLastQueryStats().isPresent(), "lastQueryStats is missing");
-            return progressMonitor.getLastQueryStats().get();
+            return progressMonitor.getLastQueryStats();
         }
 
         @Override

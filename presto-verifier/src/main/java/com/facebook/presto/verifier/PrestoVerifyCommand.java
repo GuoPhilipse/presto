@@ -56,6 +56,12 @@ public class PrestoVerifyCommand
     }
 
     @Override
+    public Set<String> getCustomQueryActionTypes()
+    {
+        return ImmutableSet.of();
+    }
+
+    @Override
     public List<Class<? extends Predicate<SourceQuery>>> getCustomQueryFilterClasses()
     {
         return ImmutableList.of();
@@ -64,6 +70,6 @@ public class PrestoVerifyCommand
     @Override
     public SqlExceptionClassifier getSqlExceptionClassifier()
     {
-        return PrestoExceptionClassifier.createDefault();
+        return PrestoExceptionClassifier.defaultBuilder().build();
     }
 }

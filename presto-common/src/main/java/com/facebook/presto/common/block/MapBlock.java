@@ -180,7 +180,7 @@ public class MapBlock
     {
         super(keyType, keyNativeHashCode, keyBlockNativeEquals, keyBlockHashCode);
 
-        int[] rawHashTables = hashTables.get().orElse(null);
+        int[] rawHashTables = hashTables.get();
         if (rawHashTables != null && rawHashTables.length < keyBlock.getPositionCount() * HASH_MULTIPLIER) {
             throw new IllegalArgumentException(format("keyBlock/valueBlock size does not match hash table size: %s %s", keyBlock.getPositionCount(), rawHashTables.length));
         }
@@ -193,6 +193,7 @@ public class MapBlock
         this.valueBlock = valueBlock;
         this.hashTables = hashTables;
         this.sizeInBytes = -1;
+        this.logicalSizeInBytes = -1;
 
         // We will add the hashtable size to the retained size even if it's not built yet. This could be overestimating
         // but is necessary to avoid reliability issues. Currently the memory counting framework only pull the retained
@@ -324,13 +325,13 @@ public class MapBlock
     @Override
     protected void ensureHashTableLoaded()
     {
-        if (this.hashTables.get().isPresent()) {
+        if (isHashTablesPresent()) {
             return;
         }
 
         // We need to synchronize access to the hashTables field as it may be shared by multiple MapBlock instances.
         synchronized (hashTables) {
-            if (this.hashTables.get().isPresent()) {
+            if (isHashTablesPresent()) {
                 return;
             }
 

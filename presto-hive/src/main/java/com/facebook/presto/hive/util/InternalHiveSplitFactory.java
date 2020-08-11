@@ -14,6 +14,7 @@
 package com.facebook.presto.hive.util;
 
 import com.facebook.presto.common.predicate.Domain;
+import com.facebook.presto.hive.EncryptionInformation;
 import com.facebook.presto.hive.HiveFileInfo;
 import com.facebook.presto.hive.HiveSplitPartitionInfo;
 import com.facebook.presto.hive.InternalHiveSplit;
@@ -22,6 +23,8 @@ import com.facebook.presto.hive.S3SelectPushdown;
 import com.facebook.presto.spi.HostAddress;
 import com.facebook.presto.spi.schedule.NodeSelectionStrategy;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
+import io.airlift.units.DataSize;
 import org.apache.hadoop.fs.BlockLocation;
 import org.apache.hadoop.fs.FileStatus;
 import org.apache.hadoop.fs.FileSystem;
@@ -34,10 +37,12 @@ import java.io.UncheckedIOException;
 import java.net.URI;
 import java.util.Arrays;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.OptionalInt;
 
 import static com.facebook.presto.hive.HiveUtil.isSplittable;
+import static com.facebook.presto.hive.util.CustomSplitConversionUtils.extractCustomSplitInfo;
 import static com.facebook.presto.spi.schedule.NodeSelectionStrategy.HARD_AFFINITY;
 import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.collect.ImmutableList.toImmutableList;
@@ -53,15 +58,19 @@ public class InternalHiveSplitFactory
     private final boolean s3SelectPushdownEnabled;
     private final HiveSplitPartitionInfo partitionInfo;
     private final boolean schedulerUsesHostAddresses;
+    private final Optional<EncryptionInformation> encryptionInformation;
+    private final long minimumTargetSplitSizeInBytes;
 
     public InternalHiveSplitFactory(
             FileSystem fileSystem,
             InputFormat<?, ?> inputFormat,
             Optional<Domain> pathDomain,
             NodeSelectionStrategy nodeSelectionStrategy,
+            DataSize minimumTargetSplitSize,
             boolean s3SelectPushdownEnabled,
             HiveSplitPartitionInfo partitionInfo,
-            boolean schedulerUsesHostAddresses)
+            boolean schedulerUsesHostAddresses,
+            Optional<EncryptionInformation> encryptionInformation)
     {
         this.fileSystem = requireNonNull(fileSystem, "fileSystem is null");
         this.inputFormat = requireNonNull(inputFormat, "inputFormat is null");
@@ -70,6 +79,9 @@ public class InternalHiveSplitFactory
         this.s3SelectPushdownEnabled = s3SelectPushdownEnabled;
         this.partitionInfo = partitionInfo;
         this.schedulerUsesHostAddresses = schedulerUsesHostAddresses;
+        this.encryptionInformation = requireNonNull(encryptionInformation, "encryptionInformation is null");
+        this.minimumTargetSplitSizeInBytes = requireNonNull(minimumTargetSplitSize, "minimumSplittableSize is null").toBytes();
+        checkArgument(minimumTargetSplitSizeInBytes > 0, "minimumTargetSplitSize must be > 0, found: %s", minimumTargetSplitSize);
     }
 
     public Optional<InternalHiveSplit> createInternalHiveSplit(HiveFileInfo fileInfo, boolean splittable)
@@ -84,7 +96,9 @@ public class InternalHiveSplitFactory
 
     private Optional<InternalHiveSplit> createInternalHiveSplit(HiveFileInfo fileInfo, OptionalInt readBucketNumber, OptionalInt tableBucketNumber, boolean splittable)
     {
-        splittable = splittable && isSplittable(inputFormat, fileSystem, fileInfo.getPath());
+        splittable = splittable &&
+                fileInfo.getLength() > minimumTargetSplitSizeInBytes &&
+                isSplittable(inputFormat, fileSystem, fileInfo.getPath());
         return createInternalHiveSplit(
                 fileInfo.getPath(),
                 fileInfo.getBlockLocations(),
@@ -94,13 +108,15 @@ public class InternalHiveSplitFactory
                 readBucketNumber,
                 tableBucketNumber,
                 splittable,
-                fileInfo.getExtraFileInfo());
+                fileInfo.getExtraFileInfo(),
+                ImmutableMap.of());
     }
 
     public Optional<InternalHiveSplit> createInternalHiveSplit(FileSplit split)
             throws IOException
     {
         FileStatus file = fileSystem.getFileStatus(split.getPath());
+        Map<String, String> customSplitInfo = extractCustomSplitInfo(split);
         return createInternalHiveSplit(
                 split.getPath(),
                 fileSystem.getFileBlockLocations(file, split.getStart(), split.getLength()),
@@ -110,7 +126,8 @@ public class InternalHiveSplitFactory
                 OptionalInt.empty(),
                 OptionalInt.empty(),
                 false,
-                Optional.empty());
+                Optional.empty(),
+                customSplitInfo);
     }
 
     private Optional<InternalHiveSplit> createInternalHiveSplit(
@@ -122,7 +139,8 @@ public class InternalHiveSplitFactory
             OptionalInt readBucketNumber,
             OptionalInt tableBucketNumber,
             boolean splittable,
-            Optional<byte[]> extraFileInfo)
+            Optional<byte[]> extraFileInfo,
+            Map<String, String> customSplitInfo)
     {
         String pathString = path.toString();
         if (!pathMatchesPredicate(pathDomain, pathString)) {
@@ -184,7 +202,9 @@ public class InternalHiveSplitFactory
                 forceLocalScheduling && allBlocksHaveRealAddress(blocks) ? HARD_AFFINITY : nodeSelectionStrategy,
                 s3SelectPushdownEnabled && S3SelectPushdown.isCompressionCodecSupported(inputFormat, path),
                 partitionInfo,
-                extraFileInfo));
+                extraFileInfo,
+                encryptionInformation,
+                customSplitInfo));
     }
 
     private boolean needsHostAddresses(boolean forceLocalScheduling, List<HostAddress> addresses)

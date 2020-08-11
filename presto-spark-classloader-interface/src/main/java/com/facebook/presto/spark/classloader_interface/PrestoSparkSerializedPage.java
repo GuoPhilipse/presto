@@ -18,7 +18,7 @@ import java.io.Serializable;
 import static java.util.Objects.requireNonNull;
 
 public class PrestoSparkSerializedPage
-        implements Serializable
+        implements Serializable, PrestoSparkTaskOutput
 {
     private final byte[] bytes;
     private final int positionCount;
@@ -51,5 +51,17 @@ public class PrestoSparkSerializedPage
     public byte getPageCodecMarkers()
     {
         return pageCodecMarkers;
+    }
+
+    @Override
+    public long getRowCount()
+    {
+        return positionCount;
+    }
+
+    @Override
+    public long getSize()
+    {
+        return bytes.length;
     }
 }

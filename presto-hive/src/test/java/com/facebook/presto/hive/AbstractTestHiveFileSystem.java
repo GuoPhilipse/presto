@@ -17,6 +17,7 @@ import com.facebook.airlift.concurrent.BoundedExecutor;
 import com.facebook.airlift.json.JsonCodec;
 import com.facebook.airlift.stats.CounterStat;
 import com.facebook.presto.GroupByHashPageIndexerFactory;
+import com.facebook.presto.cache.CacheConfig;
 import com.facebook.presto.hive.AbstractTestHiveClient.HiveTransaction;
 import com.facebook.presto.hive.AbstractTestHiveClient.Transaction;
 import com.facebook.presto.hive.authentication.NoHdfsAuthentication;
@@ -63,6 +64,7 @@ import com.facebook.presto.testing.TestingNodeManager;
 import com.google.common.collect.ImmutableList;
 import com.google.common.collect.ImmutableMap;
 import com.google.common.collect.ImmutableMultimap;
+import com.google.common.collect.ImmutableSet;
 import com.google.common.net.HostAndPort;
 import io.airlift.slice.Slice;
 import org.apache.hadoop.fs.FileSystem;
@@ -133,6 +135,7 @@ public abstract class AbstractTestHiveFileSystem
 
     private ExecutorService executor;
     private HiveClientConfig config;
+    private CacheConfig cacheConfig;
     private MetastoreClientConfig metastoreClientConfig;
 
     @BeforeClass
@@ -161,6 +164,7 @@ public abstract class AbstractTestHiveFileSystem
         temporaryCreateTable = new SchemaTableName(database, "tmp_presto_test_create_" + random);
 
         config = new HiveClientConfig().setS3SelectPushdownEnabled(s3SelectPushdownEnabled);
+        cacheConfig = new CacheConfig();
         metastoreClientConfig = new MetastoreClientConfig();
 
         String proxy = System.getProperty("hive.metastore.thrift.client.socks-proxy");
@@ -201,7 +205,9 @@ public abstract class AbstractTestHiveFileSystem
                 new HiveStagingFileCommitter(hdfsEnvironment, listeningDecorator(executor)),
                 new HiveZeroRowFileCreator(hdfsEnvironment, new OutputStreamDataSinkFactory(), listeningDecorator(executor)),
                 new NodeVersion("test_version"),
-                new HivePartitionObjectBuilder());
+                new HivePartitionObjectBuilder(),
+                new HiveEncryptionInformationProvider(ImmutableList.of()),
+                new HivePartitionStats());
         transactionManager = new HiveTransactionManager();
         splitManager = new HiveSplitManager(
                 transactionManager,
@@ -217,7 +223,9 @@ public abstract class AbstractTestHiveFileSystem
                 config.getMaxPartitionBatchSize(),
                 config.getMaxInitialSplits(),
                 config.getSplitLoaderConcurrency(),
-                config.getRecursiveDirWalkerEnabled());
+                config.getRecursiveDirWalkerEnabled(),
+                new ConfigBasedCacheQuotaRequirementProvider(cacheConfig),
+                new HiveEncryptionInformationProvider(ImmutableSet.of()));
         pageSinkProvider = new HivePageSinkProvider(
                 getDefaultHiveFileWriterFactories(config, metastoreClientConfig),
                 hdfsEnvironment,

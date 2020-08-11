@@ -18,6 +18,7 @@ import com.facebook.presto.hive.metastore.Column;
 import com.facebook.presto.spi.HostAddress;
 import com.facebook.presto.spi.schedule.NodeSelectionStrategy;
 import com.google.common.collect.ImmutableList;
+import com.google.common.collect.ImmutableMap;
 import org.apache.hadoop.fs.Path;
 import org.openjdk.jol.info.ClassLayout;
 
@@ -64,6 +65,8 @@ public class InternalHiveSplit
     private final boolean s3SelectPushdownEnabled;
     private final HiveSplitPartitionInfo partitionInfo;
     private final Optional<byte[]> extraFileInfo;
+    private final Optional<EncryptionInformation> encryptionInformation;
+    private final Map<String, String> customSplitInfo;
 
     private long start;
     private int currentBlockIndex;
@@ -80,7 +83,9 @@ public class InternalHiveSplit
             NodeSelectionStrategy nodeSelectionStrategy,
             boolean s3SelectPushdownEnabled,
             HiveSplitPartitionInfo partitionInfo,
-            Optional<byte[]> extraFileInfo)
+            Optional<byte[]> extraFileInfo,
+            Optional<EncryptionInformation> encryptionInformation,
+            Map<String, String> customSplitInfo)
     {
         checkArgument(start >= 0, "start must be positive");
         checkArgument(end >= 0, "end must be positive");
@@ -91,6 +96,7 @@ public class InternalHiveSplit
         requireNonNull(nodeSelectionStrategy, "nodeSelectionStrategy is null");
         requireNonNull(partitionInfo, "partitionInfo is null");
         requireNonNull(extraFileInfo, "extraFileInfo is null");
+        requireNonNull(encryptionInformation, "encryptionInformation is null");
 
         this.relativeUri = relativeUri.getBytes(UTF_8);
         this.start = start;
@@ -103,6 +109,8 @@ public class InternalHiveSplit
         this.s3SelectPushdownEnabled = s3SelectPushdownEnabled;
         this.partitionInfo = partitionInfo;
         this.extraFileInfo = extraFileInfo;
+        this.customSplitInfo = ImmutableMap
+            .copyOf(requireNonNull(customSplitInfo, "customSplitInfo is null"));
 
         ImmutableList.Builder<List<HostAddress>> addressesBuilder = ImmutableList.builder();
         blockEndOffsets = new long[blocks.size()];
@@ -115,6 +123,7 @@ public class InternalHiveSplit
             blockEndOffsets[i] = block.getEnd();
         }
         blockAddresses = allAddressesEmpty ? ImmutableList.of() : addressesBuilder.build();
+        this.encryptionInformation = encryptionInformation;
     }
 
     public String getPath()
@@ -211,6 +220,16 @@ public class InternalHiveSplit
     public Optional<byte[]> getExtraFileInfo()
     {
         return extraFileInfo;
+    }
+
+    public Optional<EncryptionInformation> getEncryptionInformation()
+    {
+        return this.encryptionInformation;
+    }
+
+    public Map<String, String> getCustomSplitInfo()
+    {
+        return customSplitInfo;
     }
 
     public void reset()
